@@ -1,0 +1,77 @@
+server:
+  port: 2333
+  address: 0.0.0.0
+
+lavalink:
+  server:
+    password: "youshallnotpass"
+    sources:
+      youtube: false  # Disabled - using youtube-source plugin instead
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      http: true
+      local: false
+    filters:
+      volume: true
+      equalizer: true
+      karaoke: true
+      timescale: true
+      tremolo: true
+      vibrato: true
+      rotation: true
+      distortion: true
+      channelMix: true
+      lowPass: true
+    bufferDurationMs: 400
+    frameBufferDurationMs: 5000
+    youtubePlaylistLoadLimit: 6
+    playerUpdateInterval: 5
+    youtubeSearchEnabled: true
+    soundcloudSearchEnabled: true
+    gc-warnings: true
+
+metrics:
+  prometheus:
+    enabled: false
+    endpoint: /metrics
+
+logging:
+  level:
+    root: INFO
+    lavalink: DEBUG  # Enable DEBUG logging for troubleshooting voice connections
+    dev.lavalink.youtube: DEBUG  # Enable DEBUG logging for YouTube plugin OAuth
+    dev.lavalink.youtube.http.YoutubeOauth2Handler: INFO  # OAuth handler logging (recommandé par la doc)
+    # Uncomment below for even more detailed logging if needed:
+    # lavalink.server.io.SocketContext: TRACE  # See all WebSocket messages
+    # com.sedmelluq.discord.lavaplayer.tools.ExceptionTools: DEBUG  # Log track exceptions
+  # Log all requests to the REST API for debugging
+  request:
+    enabled: true
+    includeClientInfo: true
+    includeHeaders: false
+    includeQueryString: true
+    includePayload: true
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowPlaylists: true
+    allowChannels: true
+    # Clients compatibles OAuth : TV et TVHTML5EMBEDDED
+    # Ces clients sont nécessaires pour utiliser OAuth
+    clients:
+      - TV
+      - TVHTML5EMBEDDED
+      - WEB
+      - ANDROID_VR
+    # OAuth configuration
+    # ⚠️ IMPORTANT : OAuth est REQUIS pour la plupart des vidéos YouTube
+    # Le plugin affiche un code dans les logs : allez sur https://www.google.com/device
+    # et entrez le code pour compléter le flux OAuth
+    oauth:
+      enabled: true
+      refreshToken: "1//03qjdLUu6Jy9VCgYIARAAGAMSNwF-L9IrrVroAXZdKhZ2QBf3D60dcDty32fsKoXaEviIL92xL9TKo1HYkxFB1GjY-td75Qi5oyk"

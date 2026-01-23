@@ -1,0 +1,86 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: discordbot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-discordbot}
+      POSTGRES_USER: ${DB_USER:-discordbot_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-discordbot_password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    networks:
+      - discordbot-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-discordbot_user} -d ${DB_NAME:-discordbot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4-alpine
+    container_name: lavalink
+    restart: unless-stopped
+    environment:
+      # Set Java options (512MB heap size)
+      - _JAVA_OPTIONS=-Xmx512M
+      # Set password for lavalink (can also be set in application.yml)
+      - LAVALINK_SERVER_PASSWORD=youshallnotpass
+      # Optional: set server port (default is 2333, already set in application.yml)
+      # - SERVER_PORT=2333
+    volumes:
+      # Mount application.yml from the same directory
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml
+      # Persist plugins between restarts (make sure folder exists with correct permissions)
+      - ./lavalink/plugins/:/opt/Lavalink/plugins/
+    networks:
+      - discordbot-network
+    expose:
+      # Expose port 2333 to other containers in the network
+      - 2333
+    ports:
+      # Expose to host (only needed if accessing from outside containers)
+      - "2333:2333"
+
+  discordbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: discordbot
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      lavalink:
+        condition: service_started
+    networks:
+      - discordbot-network
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - COUNTER_CHANNEL_ID=${COUNTER_CHANNEL_ID}
+      - NODE_ENV=production
+      - DB_HOST=postgres
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-discordbot}
+      - DB_USER=${DB_USER:-discordbot_user}
+      - DB_PASSWORD=${DB_PASSWORD:-discordbot_password}
+      - LAVALINK_HOST=lavalink
+      - LAVALINK_PORT=2333
+      - LAVALINK_PASSWORD=youshallnotpass
+    volumes:
+      # Persist the economy.json database
+      - ./economy.json:/app/economy.json
+      # Optional: persist data in a data directory
+      - bot-data:/app/data
+    # Keep container running even if it crashes (restart policy handles this)
+    stdin_open: true
+    tty: true
+
+volumes:
+  bot-data:
+  postgres-data:
+
+networks:
+  discordbot-network:
+    driver: bridge
