@@ -126,6 +126,22 @@ export async function casinoCommand(message, args) {
     // Remove bet amount first
     const newBalance = await removeMoney(userId, guildId, betAmount, 'casino_bet', `Mise casino: ${betAmount}`);
     
+    // Check if removeMoney returned null (insufficient funds - race condition)
+    if (newBalance === null) {
+        const embed = new EmbedBuilder()
+            .setTitle('❌ Solde insuffisant')
+            .setDescription(
+                `Vous n'avez pas assez de coins ! (Le solde a peut-être changé)\n\n` +
+                `💰 Votre solde actuel: **${(await getBalance(userId, guildId)).toLocaleString()}** coins\n` +
+                `🎰 Mise requise: **${betAmount.toLocaleString()}** coins`
+            )
+            .setColor(0xff0000)
+            .setTimestamp();
+        
+        await message.reply({ embeds: [embed] });
+        return;
+    }
+    
     // Create initial embed with spinning animation
     const initialEmbed = new EmbedBuilder()
         .setTitle('🎰 Machine à Sous - En cours...')
@@ -229,6 +245,161 @@ export async function casinoCommand(message, args) {
         )
         .setColor(color)
         .setFooter({ text: result.win ? 'Félicitations !' : 'Bonne chance pour la prochaine fois !' })
+        .setTimestamp();
+    
+    await reply.edit({ embeds: [finalEmbed] });
+}
+
+/**
+ * All-in command - Bet all money on casino
+ */
+export async function allinCommand(message) {
+    const userId = message.author.id;
+    const guildId = message.guild.id;
+    
+    // Get current balance
+    const balance = await getBalance(userId, guildId);
+    
+    // Check if user has money
+    if (balance <= 0) {
+        const embed = new EmbedBuilder()
+            .setTitle('❌ Solde insuffisant')
+            .setDescription('Vous n\'avez pas d\'argent à miser !')
+            .setColor(0xff0000)
+            .setTimestamp();
+        
+        await message.reply({ embeds: [embed] });
+        return;
+    }
+    
+    // Use all balance as bet amount
+    const betAmount = balance;
+    
+    // Remove all money first
+    const newBalance = await removeMoney(userId, guildId, betAmount, 'casino_bet', `Mise ALL-IN casino: ${betAmount}`);
+    
+    // Check if removeMoney returned null (insufficient funds - race condition)
+    if (newBalance === null) {
+        const embed = new EmbedBuilder()
+            .setTitle('❌ Solde insuffisant')
+            .setDescription('Vous n\'avez pas d\'argent à miser ! (Le solde a peut-être changé)')
+            .setColor(0xff0000)
+            .setTimestamp();
+        
+        await message.reply({ embeds: [embed] });
+        return;
+    }
+    
+    // Create initial embed with spinning animation
+    const initialEmbed = new EmbedBuilder()
+        .setTitle('🎰 ALL-IN - En cours...')
+        .setDescription('🎲 **Tirage en cours... Vous misez TOUT !**')
+        .addFields(
+            { name: '🎰 Rouleaux', value: '🔄 | 🔄 | 🔄', inline: false },
+            { name: '💰 Mise ALL-IN', value: `**${betAmount.toLocaleString()}** coins`, inline: true },
+            { name: '💵 Solde', value: `**${newBalance.toLocaleString()}** coins`, inline: true }
+        )
+        .setColor(0xff0000)
+        .setFooter({ text: 'Les rouleaux tournent... Risque maximum !' })
+        .setTimestamp();
+    
+    const reply = await message.reply({ embeds: [initialEmbed] });
+    
+    // Simulate spinning animation (3 steps)
+    const spinSteps = 3;
+    for (let i = 0; i < spinSteps; i++) {
+        await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay
+        
+        const tempSymbols = [getRandomSymbol(), getRandomSymbol(), getRandomSymbol()];
+        const tempEmbed = new EmbedBuilder()
+            .setTitle('🎰 ALL-IN - En cours...')
+            .setDescription('🎲 **Tirage en cours... Vous misez TOUT !**')
+            .addFields(
+                { name: '🎰 Rouleaux', value: `${tempSymbols[0]} | ${tempSymbols[1]} | ${tempSymbols[2]}`, inline: false },
+                { name: '💰 Mise ALL-IN', value: `**${betAmount.toLocaleString()}** coins`, inline: true },
+                { name: '💵 Solde', value: `**${newBalance.toLocaleString()}** coins`, inline: true }
+            )
+            .setColor(0xff0000)
+            .setFooter({ text: 'Les rouleaux tournent... Risque maximum !' })
+            .setTimestamp();
+        
+        await reply.edit({ embeds: [tempEmbed] });
+    }
+    
+    // Final spin result
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    const finalSymbols = [getRandomSymbol(), getRandomSymbol(), getRandomSymbol()];
+    const result = calculatePayout(finalSymbols, betAmount);
+    
+    let finalBalance = newBalance;
+    let winAmount = 0;
+    let title = '';
+    let description = '';
+    let color = 0xff0000; // Red for loss
+    
+    if (result.win) {
+        winAmount = Math.floor(betAmount * result.multiplier);
+        finalBalance = await addMoney(userId, guildId, winAmount, 'casino_win', `Gain ALL-IN casino: ${winAmount}`);
+        
+        // Determine title and description based on result type
+        if (result.type === 'triple') {
+            if (finalSymbols[0] === '7️⃣') {
+                title = '🎉 JACKPOT ALL-IN TRIPLE 7️⃣ !';
+                description = `**${message.author.username}**, vous avez gagné le JACKPOT ALL-IN avec trois 7️⃣ !\n\n` +
+                             `💰 **Gain:** ${winAmount.toLocaleString()} coins (x${result.multiplier})\n` +
+                             `💎 **Mise:** ${betAmount.toLocaleString()} coins`;
+                color = 0xffd700; // Gold
+            } else if (finalSymbols[0] === '💎') {
+                title = '💎 ALL-IN TRIPLE DIAMANT !';
+                description = `**${message.author.username}**, trois diamants 💎 en ALL-IN ! Incroyable !\n\n` +
+                             `💰 **Gain:** ${winAmount.toLocaleString()} coins (x${result.multiplier})\n` +
+                             `💎 **Mise:** ${betAmount.toLocaleString()} coins`;
+                color = 0x00ffff; // Cyan
+            } else if (finalSymbols[0] === '⭐') {
+                title = '⭐ ALL-IN TRIPLE ÉTOILE !';
+                description = `**${message.author.username}**, trois étoiles ⭐ en ALL-IN ! Fantastique !\n\n` +
+                             `💰 **Gain:** ${winAmount.toLocaleString()} coins (x${result.multiplier})\n` +
+                             `💎 **Mise:** ${betAmount.toLocaleString()} coins`;
+                color = 0xffff00; // Yellow
+            } else {
+                title = '🎉 ALL-IN TRIPLE GAGNANT !';
+                description = `**${message.author.username}**, trois symboles identiques en ALL-IN !\n\n` +
+                             `💰 **Gain:** ${winAmount.toLocaleString()} coins (x${result.multiplier})\n` +
+                             `💎 **Mise:** ${betAmount.toLocaleString()} coins`;
+                color = 0x00ff00; // Green
+            }
+        } else if (result.type === 'double') {
+            title = '🎯 ALL-IN DOUBLE GAGNANT !';
+            description = `**${message.author.username}**, deux symboles identiques en ALL-IN !\n\n` +
+                         `💰 **Gain:** ${winAmount.toLocaleString()} coins (x${result.multiplier})\n` +
+                         `💎 **Mise:** ${betAmount.toLocaleString()} coins`;
+            color = 0x00ff00; // Green
+        } else {
+            title = '🍀 ALL-IN Presque gagné !';
+            description = `**${message.author.username}**, vous avez eu de la chance en ALL-IN !\n\n` +
+                         `💰 **Gain:** ${winAmount.toLocaleString()} coins (x${result.multiplier})\n` +
+                         `💎 **Mise:** ${betAmount.toLocaleString()} coins`;
+            color = 0x90ee90; // Light green
+        }
+    } else {
+        title = '❌ ALL-IN Perdu...';
+        description = `**${message.author.username}**, aucun match en ALL-IN ! Vous avez tout perdu !\n\n` +
+                     `💸 **Perte:** ${betAmount.toLocaleString()} coins\n` +
+                     `😢 Votre solde est maintenant à **0** coins`;
+        color = 0xff0000; // Red
+    }
+    
+    const finalEmbed = new EmbedBuilder()
+        .setTitle(title)
+        .setDescription(description)
+        .addFields(
+            { name: '🎰 Résultat', value: `${finalSymbols[0]} | ${finalSymbols[1]} | ${finalSymbols[2]}`, inline: false },
+            { name: '💰 Mise ALL-IN', value: `**${betAmount.toLocaleString()}** coins`, inline: true },
+            { name: '💵 Nouveau solde', value: `**${finalBalance.toLocaleString()}** coins`, inline: true }
+        )
+        .setColor(color)
+        .setFooter({ text: result.win ? 'Félicitations pour votre courage !' : 'Le risque était élevé...' })
         .setTimestamp();
     
     await reply.edit({ embeds: [finalEmbed] });

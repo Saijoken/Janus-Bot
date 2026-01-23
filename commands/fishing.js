@@ -335,13 +335,88 @@ export async function sellFishCommand(message, args) {
         const embed = new EmbedBuilder()
             .setTitle('💰 Vendre des poissons')
             .setDescription(
-                '**Utilisation:** `$sellfish [nom] [quantité]`\n\n' +
+                '**Utilisation:** `$sellfish [nom] [quantité]` ou `$sellfish all`\n\n' +
                 '**Exemples:**\n' +
                 '• `$sellfish Poisson-Rouge` - Vendre 1 poisson\n' +
-                '• `$sellfish saumon 5` - Vendre 5 saumons (insensible à la casse)\n\n' +
+                '• `$sellfish saumon 5` - Vendre 5 saumons (insensible à la casse)\n' +
+                '• `$sellfish all` - Vendre **TOUS** vos poissons d\'un coup\n\n' +
                 'Utilisez `$inventory` pour voir vos poissons.'
             )
             .setColor(0x3498db)
+            .setTimestamp();
+        
+        await message.reply({ embeds: [embed] });
+        return;
+    }
+    
+    // Handle "all" case - sell all fish
+    if (args[0].toLowerCase() === 'all') {
+        const inventory = await getFishInventory(userId, guildId);
+        
+        // Check if inventory is empty
+        const totalFish = Object.values(inventory).reduce((sum, count) => sum + count, 0);
+        if (totalFish === 0) {
+            const embed = new EmbedBuilder()
+                .setTitle('❌ Inventaire vide')
+                .setDescription('Vous n\'avez aucun poisson à vendre !')
+                .setColor(0xff0000)
+                .setTimestamp();
+            
+            await message.reply({ embeds: [embed] });
+            return;
+        }
+        
+        // Calculate total earnings and sell all fish
+        let totalEarnings = 0;
+        const soldFish = [];
+        
+        for (const [fishName, count] of Object.entries(inventory)) {
+            if (count > 0 && FISH[fishName]) {
+                const fishData = FISH[fishName];
+                const fishEarnings = fishData.price * count;
+                totalEarnings += fishEarnings;
+                
+                // Remove all fish of this type
+                await removeFish(userId, guildId, fishName, count);
+                
+                soldFish.push({
+                    name: fishName,
+                    count: count,
+                    emoji: fishData.emoji,
+                    earnings: fishEarnings
+                });
+            }
+        }
+        
+        // Add total money
+        const newBalance = await addMoney(userId, guildId, totalEarnings, 'fish_sale', `Vendu tous les poissons (${totalFish} poissons)`);
+        
+        // Sort by earnings (highest first)
+        soldFish.sort((a, b) => b.earnings - a.earnings);
+        
+        // Create summary description
+        let description = `**${message.author.username}**, vous avez vendu **TOUS** vos poissons !\n\n`;
+        description += `📊 **Résumé de la vente:**\n`;
+        
+        // Show top 10 fish by earnings, or all if less than 10
+        const displayCount = Math.min(soldFish.length, 10);
+        for (let i = 0; i < displayCount; i++) {
+            const fish = soldFish[i];
+            description += `${fish.emoji} **${fish.name}**: ${fish.count}x → **${fish.earnings.toLocaleString()}** coins\n`;
+        }
+        
+        if (soldFish.length > 10) {
+            description += `\n... et ${soldFish.length - 10} autre(s) type(s) de poisson(s)\n`;
+        }
+        
+        description += `\n💰 **Total gagné:** **${totalEarnings.toLocaleString()}** coins\n`;
+        description += `💵 **Nouveau solde:** **${newBalance.toLocaleString()}** coins`;
+        
+        const embed = new EmbedBuilder()
+            .setTitle('💰 Vente massive réussie !')
+            .setDescription(description)
+            .setColor(0x00ff00)
+            .setFooter({ text: `${totalFish} poisson(s) vendu(s) au total` })
             .setTimestamp();
         
         await message.reply({ embeds: [embed] });

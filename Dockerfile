@@ -1,9 +1,10 @@
-# Use Node.js LTS version
-FROM node:20-slim
+# Use Node.js 24 (matching system version)
+FROM node:24-slim
 
-# Install ffmpeg (required for @discordjs/voice)
+# Install ffmpeg and git (required for @discordjs/voice and some npm packages)
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user for security
@@ -16,7 +17,8 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci --only=production
+# Use npm install instead of npm ci to avoid lock file issues
+RUN npm install --only=production --legacy-peer-deps
 
 # Copy application files
 COPY . .

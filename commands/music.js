@@ -1,10 +1,16 @@
 import { EmbedBuilder } from 'discord.js';
+import { getLyrics, searchSong } from 'genius-lyrics-api';
 
-// Get the Kazagumo player instance
-let player = null;
+// Get the Poru client instance
+let poruClient = null;
+let geniusApiKey = null;
 
-export function setPlayer(playerInstance) {
-    player = playerInstance;
+export function setGeniusApiKey(apiKey) {
+    geniusApiKey = apiKey;
+}
+
+export function setPlayer(clientInstance) {
+    poruClient = clientInstance;
 }
 
 /**
@@ -22,7 +28,7 @@ function formatDuration(ms) {
  * Play command - Add song to queue and play
  */
 export async function playCommand(message, args) {
-    if (!player) {
+    if (!poruClient) {
         await message.reply('❌ Le bot de musique n\'est pas initialisé !');
         return;
     }
@@ -45,59 +51,75 @@ export async function playCommand(message, args) {
 
         console.log('🔍 Recherche de:', query);
         
-        // Search for tracks using Kazagumo
-        const result = await player.search(query, {
-            requester: message.author,
-            engine: query.startsWith('http') ? undefined : 'youtube', // Use YouTube search if not a URL
+        // Detect source based on query (Spotify URL or YouTube URL)
+        let source = 'youtube';
+        if (query.includes('open.spotify.com') || query.includes('spotify.com')) {
+            source = 'spotify';
+        } else if (query.includes('youtube.com') || query.includes('youtu.be')) {
+            source = 'youtube';
+        } else {
+            // Default to YouTube for search queries
+            source = 'youtube';
+        }
+        
+        // Resolve tracks using Poru
+        const result = await poruClient.resolve({
+            query: query,
+            source: source,
         });
         
-        if (!result || result.tracks.length === 0) {
+        if (!result || (!result.tracks && !result.loadType)) {
             await message.reply('❌ Aucun résultat trouvé pour votre recherche !');
             return;
         }
 
         // Get or create player for this guild
-        let guildPlayer = player.players.get(message.guild.id);
+        let player = poruClient.players.get(message.guild.id);
         
-        if (!guildPlayer) {
-            guildPlayer = await player.createPlayer({
+        if (!player) {
+            player = await poruClient.createConnection({
                 guildId: message.guild.id,
-                voiceId: member.voice.channel.id,
-                textId: message.channel.id,
+                voiceChannel: member.voice.channel.id,
+                textChannel: message.channel.id,
                 deaf: true,
             });
         } else {
             // Update text channel if changed
-            guildPlayer.setTextChannel(message.channel.id);
+            player.textChannel = message.channel.id;
         }
 
-        // Handle playlist or single track
-        if (result.type === 'PLAYLIST') {
+        // Handle different load types
+        if (result.loadType === 'PLAYLIST_LOADED') {
+            // Playlist
             for (const track of result.tracks) {
-                guildPlayer.queue.add(track);
+                player.queue.add(track);
             }
             
             const embed = new EmbedBuilder()
-                .setDescription(`✅ **${result.playlistName}** (${result.tracks.length} chansons) ajoutée à la file d'attente !`)
+                .setDescription(`✅ **${result.playlistInfo.name}** (${result.tracks.length} chansons) ajoutée à la file d'attente !`)
                 .setColor(0x00ff00)
-                .setThumbnail(result.tracks[0]?.thumbnail || null);
+                .setThumbnail(result.tracks[0]?.info?.image || null);
+
+            await message.reply({ embeds: [embed] });
+        } else if (result.loadType === 'SEARCH_RESULT' || result.loadType === 'TRACK_LOADED') {
+            // Single track
+            const track = result.tracks[0];
+            player.queue.add(track);
+            
+            const embed = new EmbedBuilder()
+                .setDescription(`✅ **${track.info.title}** ajouté à la file d'attente !`)
+                .setColor(0x00ff00)
+                .setThumbnail(track.info.image || null);
 
             await message.reply({ embeds: [embed] });
         } else {
-            const track = result.tracks[0];
-            guildPlayer.queue.add(track);
-            
-            const embed = new EmbedBuilder()
-                .setDescription(`✅ **${track.title}** ajouté à la file d'attente !`)
-                .setColor(0x00ff00)
-                .setThumbnail(track.thumbnail || null);
-
-            await message.reply({ embeds: [embed] });
+            await message.reply('❌ Aucun résultat trouvé pour votre recherche !');
+            return;
         }
 
         // Start playing if not already playing
-        if (!guildPlayer.playing && !guildPlayer.paused) {
-            await guildPlayer.play();
+        if (!player.isPlaying && !player.isPaused) {
+            await player.play();
         }
     } catch (error) {
         console.error('Error in play command:', error);
@@ -119,23 +141,23 @@ export async function playCommand(message, args) {
  * Pause command
  */
 export async function pauseCommand(message) {
-    if (!player) {
+    if (!poruClient) {
         await message.reply('❌ Le bot de musique n\'est pas initialisé !');
         return;
     }
 
-    const guildPlayer = player.players.get(message.guild.id);
-    if (!guildPlayer || !guildPlayer.playing) {
+    const player = poruClient.players.get(message.guild.id);
+    if (!player || !player.isPlaying) {
         await message.reply('❌ Aucune musique n\'est en cours de lecture !');
         return;
     }
 
-    if (guildPlayer.paused) {
+    if (player.isPaused) {
         await message.reply('⏸️ La musique est déjà en pause !');
         return;
     }
 
-    await guildPlayer.pause(true);
+    await player.pause(true);
     const embed = new EmbedBuilder()
         .setDescription('⏸️ Musique mise en pause')
         .setColor(0xff9900);
@@ -147,23 +169,23 @@ export async function pauseCommand(message) {
  * Resume command
  */
 export async function resumeCommand(message) {
-    if (!player) {
+    if (!poruClient) {
         await message.reply('❌ Le bot de musique n\'est pas initialisé !');
         return;
     }
 
-    const guildPlayer = player.players.get(message.guild.id);
-    if (!guildPlayer) {
+    const player = poruClient.players.get(message.guild.id);
+    if (!player) {
         await message.reply('❌ Aucune musique n\'est en cours de lecture !');
         return;
     }
 
-    if (!guildPlayer.paused) {
+    if (!player.isPaused) {
         await message.reply('▶️ La musique n\'est pas en pause !');
         return;
     }
 
-    await guildPlayer.pause(false);
+    await player.pause(false);
     const embed = new EmbedBuilder()
         .setDescription('▶️ Musique reprise')
         .setColor(0x00ff00);
@@ -175,13 +197,13 @@ export async function resumeCommand(message) {
  * Skip command
  */
 export async function skipCommand(message, args) {
-    if (!player) {
+    if (!poruClient) {
         await message.reply('❌ Le bot de musique n\'est pas initialisé !');
         return;
     }
 
-    const guildPlayer = player.players.get(message.guild.id);
-    if (!guildPlayer || !guildPlayer.playing) {
+    const player = poruClient.players.get(message.guild.id);
+    if (!player || !player.isPlaying) {
         await message.reply('❌ Aucune musique n\'est en cours de lecture !');
         return;
     }
@@ -193,20 +215,20 @@ export async function skipCommand(message, args) {
         return;
     }
 
-    const currentTrack = guildPlayer.queue.current;
+    const currentTrack = player.currentTrack;
     
     if (skipCount === 1) {
-        await guildPlayer.skip();
+        await player.skip();
         const embed = new EmbedBuilder()
-            .setDescription(`⏭️ Passage de **${currentTrack.title}**...`)
+            .setDescription(`⏭️ Passage de **${currentTrack.info.title}**...`)
             .setColor(0xff9900);
         await message.reply({ embeds: [embed] });
     } else {
         // Skip multiple songs
-        for (let i = 0; i < skipCount - 1 && guildPlayer.queue.size > 0; i++) {
-            guildPlayer.queue.remove(0);
+        for (let i = 0; i < skipCount - 1 && player.queue.length > 0; i++) {
+            player.queue.shift();
         }
-        await guildPlayer.skip();
+        await player.skip();
         const embed = new EmbedBuilder()
             .setDescription(`⏭️ Passage de ${skipCount} chanson(s)...`)
             .setColor(0xff9900);
@@ -218,18 +240,18 @@ export async function skipCommand(message, args) {
  * Stop command
  */
 export async function stopCommand(message) {
-    if (!player) {
+    if (!poruClient) {
         await message.reply('❌ Le bot de musique n\'est pas initialisé !');
         return;
     }
 
-    const guildPlayer = player.players.get(message.guild.id);
-    if (!guildPlayer) {
+    const player = poruClient.players.get(message.guild.id);
+    if (!player) {
         await message.reply('❌ Aucune musique n\'est en cours de lecture !');
         return;
     }
 
-    guildPlayer.destroy();
+    player.destroy();
     const embed = new EmbedBuilder()
         .setDescription('🛑 Musique arrêtée et file d\'attente vidée')
         .setColor(0xff0000);
@@ -241,19 +263,19 @@ export async function stopCommand(message) {
  * Queue command - Show current queue
  */
 export async function queueCommand(message) {
-    if (!player) {
+    if (!poruClient) {
         await message.reply('❌ Le bot de musique n\'est pas initialisé !');
         return;
     }
 
-    const guildPlayer = player.players.get(message.guild.id);
-    if (!guildPlayer || guildPlayer.queue.size === 0) {
+    const player = poruClient.players.get(message.guild.id);
+    if (!player || player.queue.length === 0) {
         await message.reply('❌ La file d\'attente est vide !');
         return;
     }
 
-    const queueList = guildPlayer.queue.map((track, index) => {
-        return `${index + 1}. **${track.title}**`;
+    const queueList = player.queue.map((track, index) => {
+        return `${index + 1}. **${track.info.title}**`;
     }).slice(0, 10).join('\n');
 
     const embed = new EmbedBuilder()
@@ -261,15 +283,15 @@ export async function queueCommand(message) {
         .setDescription(queueList)
         .setColor(0x0099ff)
         .setFooter({ 
-            text: guildPlayer.queue.size > 10 
-                ? `Et ${guildPlayer.queue.size - 10} autre(s) chanson(s)...` 
-                : `${guildPlayer.queue.size} chanson(s) au total` 
+            text: player.queue.length > 10 
+                ? `Et ${player.queue.length - 10} autre(s) chanson(s)...` 
+                : `${player.queue.length} chanson(s) au total` 
         });
 
-    if (guildPlayer.queue.current) {
+    if (player.currentTrack) {
         embed.addFields({
             name: '🎵 En cours',
-            value: `**${guildPlayer.queue.current.title}**`,
+            value: `**${player.currentTrack.info.title}**`,
             inline: false
         });
     }
@@ -281,31 +303,31 @@ export async function queueCommand(message) {
  * Now playing command
  */
 export async function nowplayingCommand(message) {
-    if (!player) {
+    if (!poruClient) {
         await message.reply('❌ Le bot de musique n\'est pas initialisé !');
         return;
     }
 
-    const guildPlayer = player.players.get(message.guild.id);
-    if (!guildPlayer || !guildPlayer.queue.current) {
+    const player = poruClient.players.get(message.guild.id);
+    if (!player || !player.currentTrack) {
         await message.reply('❌ Aucune musique n\'est en cours de lecture !');
         return;
     }
 
-    const track = guildPlayer.queue.current;
-    const status = guildPlayer.paused ? '⏸️ En pause' : '▶️ En cours de lecture';
+    const track = player.currentTrack;
+    const status = player.isPaused ? '⏸️ En pause' : '▶️ En cours de lecture';
 
     const embed = new EmbedBuilder()
         .setTitle('🎵 En cours de lecture')
-        .setDescription(`**[${track.title}](${track.uri})**`)
+        .setDescription(`**[${track.info.title}](${track.info.uri})**`)
         .addFields(
-            { name: '⏱️ Durée', value: track.isStream ? 'Live' : formatDuration(track.length), inline: true },
-            { name: '👤 Artiste', value: track.author || 'Inconnu', inline: true },
+            { name: '⏱️ Durée', value: track.info.isStream ? 'Live' : formatDuration(track.info.length), inline: true },
+            { name: '👤 Artiste', value: track.info.author || 'Inconnu', inline: true },
             { name: '📊 Statut', value: status, inline: true }
         )
-        .setThumbnail(track.thumbnail || null)
-        .setColor(guildPlayer.paused ? 0xff9900 : 0x00ff00)
-        .setFooter({ text: `${guildPlayer.queue.size} chanson(s) dans la file` });
+        .setThumbnail(track.info.image || null)
+        .setColor(player.isPaused ? 0xff9900 : 0x00ff00)
+        .setFooter({ text: `${player.queue.length} chanson(s) dans la file` });
 
     await message.reply({ embeds: [embed] });
 }
@@ -314,18 +336,18 @@ export async function nowplayingCommand(message) {
  * Leave command - Disconnect from voice channel
  */
 export async function leaveCommand(message) {
-    if (!player) {
+    if (!poruClient) {
         await message.reply('❌ Le bot de musique n\'est pas initialisé !');
         return;
     }
 
-    const guildPlayer = player.players.get(message.guild.id);
-    if (!guildPlayer) {
+    const player = poruClient.players.get(message.guild.id);
+    if (!player) {
         await message.reply('❌ Je ne suis pas connecté à un canal vocal !');
         return;
     }
 
-    guildPlayer.destroy();
+    player.destroy();
     const embed = new EmbedBuilder()
         .setDescription('👋 Déconnexion du canal vocal')
         .setColor(0xff9900);
@@ -334,9 +356,99 @@ export async function leaveCommand(message) {
 }
 
 /**
+ * Lyrics command - Get lyrics from Genius
+ */
+export async function lyricsCommand(message) {
+    if (!geniusApiKey) {
+        await message.reply('❌ L\'API Genius n\'est pas configurée !');
+        return;
+    }
+
+    const player = poruClient?.players.get(message.guild.id);
+    if (!player || !player.currentTrack) {
+        await message.reply('❌ Aucune musique n\'est en cours de lecture !');
+        return;
+    }
+
+    const track = player.currentTrack;
+    const title = track.info.title;
+    const author = track.info.author || 'Unknown';
+
+    try {
+        await message.channel.sendTyping();
+
+        // Search for the song on Genius
+        const searchResults = await searchSong({
+            apiKey: geniusApiKey,
+            title: title,
+            artist: author,
+            optimizeQuery: true,
+        });
+
+        if (!searchResults || searchResults.length === 0) {
+            await message.reply(`❌ Aucune parole trouvée pour **${title}** par **${author}**`);
+            return;
+        }
+
+        // Get lyrics from the first result
+        const lyrics = await getLyrics({
+            apiKey: geniusApiKey,
+            title: searchResults[0].title,
+            artist: searchResults[0].artist.name,
+            optimizeQuery: true,
+        });
+
+        if (!lyrics) {
+            await message.reply(`❌ Impossible de récupérer les paroles pour **${title}**`);
+            return;
+        }
+
+        // Split lyrics if too long (Discord limit is 4096 characters)
+        const maxLength = 4096 - 100; // Leave some margin
+        if (lyrics.length > maxLength) {
+            const chunks = [];
+            for (let i = 0; i < lyrics.length; i += maxLength) {
+                chunks.push(lyrics.substring(i, i + maxLength));
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle(`🎵 Paroles: ${searchResults[0].title}`)
+                .setDescription(chunks[0])
+                .setColor(0x1db954)
+                .setFooter({ text: `Par ${searchResults[0].artist.name} • Page 1/${chunks.length}` })
+                .setThumbnail(searchResults[0].albumArt || track.info.image || null);
+
+            await message.reply({ embeds: [embed] });
+
+            // Send remaining chunks
+            for (let i = 1; i < chunks.length; i++) {
+                const chunkEmbed = new EmbedBuilder()
+                    .setDescription(chunks[i])
+                    .setColor(0x1db954)
+                    .setFooter({ text: `Page ${i + 1}/${chunks.length}` });
+
+                await message.channel.send({ embeds: [chunkEmbed] });
+            }
+        } else {
+            const embed = new EmbedBuilder()
+                .setTitle(`🎵 Paroles: ${searchResults[0].title}`)
+                .setDescription(lyrics)
+                .setColor(0x1db954)
+                .setFooter({ text: `Par ${searchResults[0].artist.name}` })
+                .setThumbnail(searchResults[0].albumArt || track.info.image || null);
+
+            await message.reply({ embeds: [embed] });
+        }
+    } catch (error) {
+        console.error('Error in lyrics command:', error);
+        await message.reply(`❌ Erreur lors de la récupération des paroles: ${error.message}`);
+    }
+}
+
+/**
  * Auto-disconnect check (for compatibility with index.js)
  */
 export async function checkAutoDisconnect(guild) {
-    // Kazagumo handles auto-disconnect automatically via playerEmpty event
+    // Poru handles auto-disconnect automatically via playerEmpty event
     // This function is kept for compatibility
 }

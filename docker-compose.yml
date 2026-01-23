@@ -7,16 +7,35 @@ services:
       POSTGRES_DB: ${DB_NAME:-discordbot}
       POSTGRES_USER: ${DB_USER:-discordbot_user}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-discordbot_password}
+      # Optimisations pour démarrage rapide
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+      PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
     networks:
       - discordbot-network
+    # Healthcheck optimisé pour détection rapide
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-discordbot_user} -d ${DB_NAME:-discordbot}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      interval: 1s
+      timeout: 1s
+      retries: 15
+      start_period: 3s
+    # Optimisations supplémentaires pour démarrage rapide
+    command: >
+      postgres
+      -c shared_buffers=128MB
+      -c effective_cache_size=256MB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=4MB
+      -c min_wal_size=80MB
+      -c max_wal_size=1GB
 
   lavalink:
     image: ghcr.io/lavalink-devs/lavalink:4-alpine
@@ -54,6 +73,7 @@ services:
         condition: service_healthy
       lavalink:
         condition: service_started
+    # Le bot attendra que PostgreSQL soit prêt grâce au healthcheck optimisé
     networks:
       - discordbot-network
     environment:

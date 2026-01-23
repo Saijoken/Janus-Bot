@@ -20,8 +20,8 @@ import * as fishingCommands from './commands/fishing.js';
 import * as casinoCommands from './commands/casino.js';
 import * as musicCommands from './commands/music.js';
 import { checkAutoDisconnect as checkMusicAutoDisconnect } from './commands/music.js';
-import { Kazagumo } from 'kazagumo';
-import { Connectors } from 'shoukaku';
+import { Poru } from 'poru';
+import { Spotify } from 'poru-spotify';
 
 // Validate required environment variables
 if (!process.env.DISCORD_TOKEN) {
@@ -42,8 +42,8 @@ const client = new Client({
 // Command prefix
 const PREFIX = '$';
 
-// Initialize Kazagumo player with Lavalink (will be initialized after client is ready)
-let kazagumoPlayer = null;
+// Initialize Poru client with Lavalink (will be initialized after client is ready)
+let poruClient = null;
 
 // Store interval references for cleanup
 let updateInterval = null;
@@ -163,6 +163,7 @@ client.on('messageCreate', async (message) => {
                 await fishingCommands.fishCommand(message);
                 break;
             case 'sellfish':
+            case 'sf':
             case 'vendre':
                 await fishingCommands.sellFishCommand(message, args);
                 break;
@@ -180,6 +181,10 @@ client.on('messageCreate', async (message) => {
             case 'slot':
             case 'slots':
                 await casinoCommands.casinoCommand(message, args);
+                break;
+            case 'allin':
+            case 'all-in':
+                await casinoCommands.allinCommand(message);
                 break;
             case 'say':
                 await gamesCommands.sayCommand(message, args);
@@ -215,6 +220,10 @@ client.on('messageCreate', async (message) => {
             case 'disconnect':
             case 'dc':
                 await musicCommands.leaveCommand(message);
+                break;
+            case 'lyrics':
+            case 'ly':
+                await musicCommands.lyricsCommand(message);
                 break;
             default:
                 // Silently ignore unknown commands to avoid spam
@@ -521,138 +530,155 @@ async function checkVoiceRewards() {
 }
 
 
-// Note: Shoukaku's Connectors.DiscordJS automatically handles voice events (VOICE_SERVER_UPDATE and VOICE_STATE_UPDATE)
-// These events are forwarded to Lavalink with sessionId, token, and endpoint automatically
-// No manual raw event handler is needed - the connector handles it internally
-
-// IMPORTANT: Kazagumo/Shoukaku must be initialized BEFORE client.login()
-// Otherwise nodes will never connect!
+// Poru configuration - will be initialized after client is ready
 const lavalinkHost = process.env.LAVALINK_HOST || 'lavalink';
 const lavalinkPort = parseInt(process.env.LAVALINK_PORT || '2333');
 const lavalinkPassword = process.env.LAVALINK_PASSWORD || 'youshallnotpass';
 
-console.log(`🔌 Initialisation de Kazagumo avec Lavalink: host=${lavalinkHost}, port=${lavalinkPort}`);
-
-kazagumoPlayer = new Kazagumo({
-    defaultSearchEngine: 'youtube',
-    // send function for routing gateway messages (required for sharding support)
-    // For non-sharded bots, we can use client.ws or check if shard exists
-    send: (guildId, payload) => {
-        const guild = client.guilds.cache.get(guildId);
-        if (guild && guild.shard) {
-            // Bot is sharded - send through shard
-            guild.shard.send(payload);
-        } else if (client.ws) {
-            // Bot is not sharded - send directly through websocket
-            client.ws.send(payload);
-        }
-    },
-}, new Connectors.DiscordJS(client), [{
-    name: 'lavalink',
-    url: `${lavalinkHost}:${lavalinkPort}`,
-    auth: lavalinkPassword,
-}], {
-    reconnectTries: 5,
-    reconnectInterval: 5000,
-    restTimeout: 60000,
-    resume: false,
-});
-
-// Set up event handlers for connection status
-kazagumoPlayer.shoukaku.on('ready', (name, resumed) => {
-    console.log(`✅ Lavalink node "${name}" connected${resumed ? ' (resumed)' : ''}`);
-});
-
-kazagumoPlayer.shoukaku.on('error', (name, error) => {
-    console.error(`❌ Lavalink node "${name}" error:`, error);
-});
-
-kazagumoPlayer.shoukaku.on('close', (name, code, reason) => {
-    console.warn(`⚠️ Lavalink node "${name}" closed: ${code} ${reason}`);
-});
-
-kazagumoPlayer.shoukaku.on('disconnect', (name, reason) => {
-    console.warn(`⚠️ Lavalink node "${name}" disconnected: ${reason}`);
-});
-
-// Set up Kazagumo event handlers
-kazagumoPlayer.on('playerStart', (player, track) => {
-    const formatDuration = (ms) => {
-        if (!ms || ms === 0) return '0:00';
-        const seconds = Math.floor(ms / 1000);
-        const minutes = Math.floor(seconds / 60);
-        const remainingSeconds = seconds % 60;
-        return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
-    };
-
-    const embed = new EmbedBuilder()
-        .setTitle('🎵 En cours de lecture')
-        .setDescription(`**[${track.title}](${track.uri})**`)
-        .addFields(
-            { name: '⏱️ Durée', value: track.isStream ? 'Live' : formatDuration(track.length), inline: true },
-            { name: '👤 Artiste', value: track.author || 'Inconnu', inline: true }
-        )
-        .setThumbnail(track.thumbnail || null)
-        .setColor(0x00ff00);
-
-    const channel = client.channels.cache.get(player.textChannel);
-    if (channel) channel.send({ embeds: [embed] }).catch(() => {});
-});
-
-kazagumoPlayer.on('playerEmpty', (player) => {
-    const embed = new EmbedBuilder()
-        .setDescription('🔇 Le canal vocal est vide. Je me déconnecte...')
-        .setColor(0xff9900);
-
-    const channel = client.channels.cache.get(player.textChannel);
-    if (channel) channel.send({ embeds: [embed] }).catch(() => {});
-    
-    player.destroy();
-});
-
-kazagumoPlayer.on('queueEnd', (player) => {
-    const embed = new EmbedBuilder()
-        .setDescription('✅ La file d\'attente est terminée !')
-        .setColor(0x00ff00);
-
-    const channel = client.channels.cache.get(player.textChannel);
-    if (channel) channel.send({ embeds: [embed] }).catch(() => {});
-    
-    player.destroy();
-});
-
-console.log('✅ Kazagumo initialisé (connexion au node Lavalink en cours...)');
+console.log(`🔌 Configuration Poru pour Lavalink: host=${lavalinkHost}, port=${lavalinkPort}`);
 
 // Update counter when bot is ready (using clientReady to avoid deprecation warning)
 client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}!`);
     console.log(`Bot is using prefix: ${PREFIX}`);
     
-    // Set player instance in music commands (now that client is ready)
-    musicCommands.setPlayer(kazagumoPlayer);
+    // Initialize Poru client (following AeroX example exactly)
+    console.log('🔌 Initialisation de Poru avec Lavalink...');
     
-    // Wait a bit for Lavalink to be ready and node to connect
-    console.log('⏳ Attente de la connexion au node Lavalink...');
-    await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds for connection
+    // Create nodes array (following AeroX pattern)
+    const nodes = [{
+        name: 'lavalink',
+        host: lavalinkHost,
+        port: lavalinkPort,
+        password: lavalinkPassword,
+        secure: false,
+    }];
     
-    // Check if node is connected (check both state and connection status)
-    const nodes = kazagumoPlayer.shoukaku.nodes;
-    const connectedNodes = Array.from(nodes.values()).filter(node => {
-        // Node is connected if state is CONNECTED or if it has a sessionId (which means it's connected)
-        return node.state === 'CONNECTED' || node.sessionId !== null;
+    // Get Spotify credentials from environment
+    const spotifyClientId = process.env.SPOTIFY_CLIENT_ID || '';
+    const spotifyClientSecret = process.env.SPOTIFY_CLIENT_SECRET || '';
+    
+    // Initialize plugins array (Spotify if credentials are available)
+    const plugins = [];
+    if (spotifyClientId && spotifyClientSecret) {
+        plugins.push(new Spotify({
+            clientID: spotifyClientId,
+            clientSecret: spotifyClientSecret,
+        }));
+        console.log('✅ Plugin Spotify activé');
+    }
+    
+    // Initialize Poru with proper configuration (following AeroX example)
+    poruClient = new Poru(client, nodes, {
+        library: 'discord.js',
+        defaultPlatform: process.env.MUSIC_DEFAULT_PLATFORM || 'youtube',
+        resumeKey: 'DiscordBot',
+        resumeTimeout: 60,
+        reconnectTimeout: 10000,
+        reconnectTries: 5,
+        plugins: plugins,
     });
     
-    if (connectedNodes.length > 0) {
-        console.log(`✅ ${connectedNodes.length} node(s) Lavalink connecté(s) !`);
-    } else {
-        // Check all nodes to see their states
-        const allNodes = Array.from(nodes.values());
-        if (allNodes.length > 0) {
-            console.warn(`⚠️ ${allNodes.length} node(s) configuré(s) mais aucun connecté. États:`, 
-                allNodes.map(n => `${n.name}: ${n.state}`).join(', '));
+    // Set up Poru event handlers (following AeroX pattern)
+    poruClient.on('nodeConnect', (node) => {
+        console.log(`✅ Lavalink node "${node.name}" connected`);
+    });
+    
+    poruClient.on('nodeReconnect', (node) => {
+        console.log(`🔄 Lavalink node reconnecting: ${node.name}`);
+    });
+    
+    poruClient.on('nodeDisconnect', (node) => {
+        console.warn(`⚠️ Lavalink node disconnected: ${node.name}`);
+    });
+    
+    poruClient.on('nodeError', (node, error) => {
+        console.error(`❌ Lavalink node error (${node.name}): ${error.message}`);
+    });
+    
+    // Wait a bit for Lavalink to be ready before initializing Poru
+    console.log('⏳ Attente que Lavalink soit prêt...');
+    await new Promise(resolve => setTimeout(resolve, 8000)); // Wait 8 seconds for Lavalink to fully start
+    
+    // Initialize Poru (must be called after client is ready, following AeroX pattern)
+    poruClient.init(client.user.id);
+    console.log('✅ Poru client initialisé');
+    
+    // Set up player event handlers
+    poruClient.on('trackStart', (player, track) => {
+        const formatDuration = (ms) => {
+            if (!ms || ms === 0) return '0:00';
+            const seconds = Math.floor(ms / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const remainingSeconds = seconds % 60;
+            return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+        };
+
+        const embed = new EmbedBuilder()
+            .setTitle('🎵 En cours de lecture')
+            .setDescription(`**[${track.info.title}](${track.info.uri})**`)
+            .addFields(
+                { name: '⏱️ Durée', value: track.info.isStream ? 'Live' : formatDuration(track.info.length), inline: true },
+                { name: '👤 Artiste', value: track.info.author || 'Inconnu', inline: true }
+            )
+            .setThumbnail(track.info.image || null)
+            .setColor(0x00ff00);
+
+        const channel = client.channels.cache.get(player.textChannel);
+        if (channel) channel.send({ embeds: [embed] }).catch(() => {});
+    });
+    
+    poruClient.on('playerEmpty', (player) => {
+        const embed = new EmbedBuilder()
+            .setDescription('🔇 Le canal vocal est vide. Je me déconnecte...')
+            .setColor(0xff9900);
+
+        const channel = client.channels.cache.get(player.textChannel);
+        if (channel) channel.send({ embeds: [embed] }).catch(() => {});
+        
+        player.destroy();
+    });
+    
+    poruClient.on('queueEnd', (player) => {
+        const embed = new EmbedBuilder()
+            .setDescription('✅ La file d\'attente est terminée !')
+            .setColor(0x00ff00);
+
+        const channel = client.channels.cache.get(player.textChannel);
+        if (channel) channel.send({ embeds: [embed] }).catch(() => {});
+        
+        player.destroy();
+    });
+    
+    // Set player instance in music commands (now that client is ready)
+    musicCommands.setPlayer(poruClient);
+    
+    // Set Genius API key if available
+    const geniusApiKey = process.env.GENIUS_API_KEY || '';
+    if (geniusApiKey) {
+        musicCommands.setGeniusApiKey(geniusApiKey);
+        console.log('✅ API Genius configurée');
+    }
+    
+    // Wait for node connection (following AeroX pattern)
+    console.log('⏳ Attente de la connexion au node Lavalink...');
+    
+    // Wait a bit for connection
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
+    // Check node connection status
+    const poruNodes = poruClient.nodes;
+    if (poruNodes && poruNodes.size > 0) {
+        const connectedNodes = Array.from(poruNodes.values()).filter(node => node.isConnected);
+        if (connectedNodes.length > 0) {
+            console.log(`✅ ${connectedNodes.length} node(s) Lavalink connecté(s) !`);
         } else {
-            console.warn('⚠️ Aucun node Lavalink configuré.');
+            const allNodes = Array.from(poruNodes.values());
+            console.warn(`⚠️ ${allNodes.length} node(s) configuré(s) mais aucun connecté. États:`, 
+                allNodes.map(n => `${n.name}: ${n.isConnected ? 'connected' : 'disconnected'}`).join(', '));
         }
+    } else {
+        console.warn('⚠️ Aucun node Lavalink configuré.');
     }
     
     // Migrate fish from inventory to collection (one-time migration on startup)
@@ -694,6 +720,9 @@ client.once('clientReady', async () => {
     console.log('Récompenses vocales actives (50 coins toutes les 30 minutes).');
     console.log('Système d\'économie prêt ! Utilisez $help pour les commandes.');
 });
+
+// Poru with library: 'discord.js' handles voice events automatically
+// No manual raw event handler needed when using library: 'discord.js'
 
 // Handle client errors
 client.on('error', (error) => {

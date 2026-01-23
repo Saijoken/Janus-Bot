@@ -73,5 +73,5 @@ plugins:
     # Le plugin affiche un code dans les logs : allez sur https://www.google.com/device
     # et entrez le code pour compléter le flux OAuth
     oauth:
-      enabled: true
+      enabled: false
       refreshToken: "1//03qjdLUu6Jy9VCgYIARAAGAMSNwF-L9IrrVroAXZdKhZ2QBf3D60dcDty32fsKoXaEviIL92xL9TKo1HYkxFB1GjY-td75Qi5oyk"
