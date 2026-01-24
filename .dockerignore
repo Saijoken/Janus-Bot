@@ -1,19 +1,102 @@
-node_modules
-npm-debug.log
+# ========================================
+# Git & Version Control
+# ========================================
 .git
 .gitignore
+.gitattributes
+
+# ========================================
+# Environment & Secrets
+# ========================================
 .env
 .env.local
 .env.*.local
-*.log
-.DS_Store
+.env.production
+.env.development
+
+# ========================================
+# Node.js (will be installed fresh in container)
+# ========================================
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn
+
+# ========================================
+# IDE & Editors
+# ========================================
+.cursor
 .vscode
 .idea
 *.swp
 *.swo
 *~
-.cursor
-README.md
+
+# ========================================
+# Docker files (not needed inside container)
+# ========================================
 .dockerignore
 Dockerfile
 docker-compose.yml
+docker-compose.override.yml
+
+# ========================================
+# Lavalink (separate container)
+# ========================================
+lavalink/
+
+# ========================================
+# YT-Cipher source (separate build context)
+# ========================================
+yt-cipher-src/
+
+# ========================================
+# Documentation
+# ========================================
+*.md
+README*
+MIGRATION*
+DOCKER*
+LICENSE
+
+# ========================================
+# Database & Data files
+# ========================================
+economy.json
+*.db
+*.db-shm
+*.db-wal
+*.json.tmp
+schema.sql
+
+# ========================================
+# Logs
+# ========================================
+*.log
+logs/
+
+# ========================================
+# Scripts (not needed in container)
+# ========================================
+*.sh
+install-*.sh
+setup-*.sh
+fix-*.sh
+
+# ========================================
+# OS Files
+# ========================================
+.DS_Store
+Thumbs.db
+desktop.ini
+*.bak
+
+# ========================================
+# Temporary files
+# ========================================
+*.tmp
+*.temp
+*.bak
+agent-transcripts/

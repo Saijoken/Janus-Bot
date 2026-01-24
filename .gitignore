@@ -1,9 +1,15 @@
-# Environment variables
+# ========================================
+# Environment & Secrets
+# ========================================
 .env
 .env.local
 .env.*.local
+.env.production
+.env.development
 
-# Database
+# ========================================
+# Database & Data
+# ========================================
 *.db
 *.db-shm
 *.db-wal
@@ -11,40 +17,66 @@ economy.json
 *.json.tmp
 *.tmp
 
-# Node modules
+# ========================================
+# Node.js
+# ========================================
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 package-lock.json
+.npm/
+.yarn/
 
+# ========================================
 # Logs
+# ========================================
 *.log
 logs/
 *.log.*
 
-# Docker
+# ========================================
+# Docker & Volumes
+# ========================================
 docker-compose.override.yml
 .docker/
 bot-data/
 postgres-data/
 
-# Build and dist
+# ========================================
+# External Dependencies (cloned repos)
+# ========================================
+yt-cipher-src/
+
+# ========================================
+# Lavalink
+# ========================================
+# Downloaded plugins (auto-downloaded by Lavalink)
+lavalink/plugins/*.jar
+# Backups
+lavalink/plugins/*.jar.backup
+lavalink/plugins/*.backup
+
+# ========================================
+# Build & Dist
+# ========================================
 dist/
 build/
 *.tsbuildinfo
 
-# IDE and editors
+# ========================================
+# IDE & Editors
+# ========================================
 .cursor/
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-.DS_Store
-Thumbs.db
 
-# Documentation (troubleshooting and temporary docs)
+# ========================================
+# Temporary Documentation
+# ========================================
 OAUTH_*.md
 VERIFY_OAUTH.md
 YOUTUBE_OAUTH_SETUP.md
@@ -59,7 +91,9 @@ LAVALINK_CLIENT_ANALYSIS.md
 PERMISSIONS.md
 README-DOCKER-PERMISSIONS.txt
 
-# Scripts (temporary setup scripts)
+# ========================================
+# Temporary Scripts
+# ========================================
 install-*.sh
 setup-*.sh
 fix-*.sh
@@ -68,28 +102,27 @@ run-migration.sh
 migrate-*.js
 reset-*.js
 
+# ========================================
 # Python
+# ========================================
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
 get_youtube_token.py
+venv/
+.venv/
 
-# Lavalink plugins and backups
-lavalink/plugins/*.jar.backup
-lavalink/plugins/*.backup
-
-# Sound files (optional - uncomment if you don't want to track sound files)
-# sounds/*.mp3
-# sounds/*.ogg
-# sounds/*.wav
-
-# OS files
+# ========================================
+# OS Files
+# ========================================
 .DS_Store
 Thumbs.db
 desktop.ini
+*.bak
 
-# Git
-.git/
-.gitignore.bak
+# ========================================
+# Cursor/Claude transcripts
+# ========================================
+agent-transcripts/
