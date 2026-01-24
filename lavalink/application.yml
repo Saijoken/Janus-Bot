@@ -1,52 +1,80 @@
 server:
   port: 2333
   address: 0.0.0.0
+  undertow:
+    buffer-size: 16384
+    direct-buffers: true
 
 lavalink:
   server:
-    password: "youshallnotpass"
+    # Timeout configuration for remote cipher
+    httpConfig:
+      proxyHost: ""
+      proxyPort: 0
+      proxyUser: ""
+      proxyPassword: ""
+    # Timeout settings for yt-cipher requests
+    timeouts:
+      connectTimeoutMs: 10000
+      connectionRequestTimeoutMs: 10000
+      socketTimeoutMs: 10000
     sources:
-      youtube: false  # Disabled - using youtube-source plugin instead
+      youtube: false  # Using youtube-source plugin instead
       bandcamp: true
       soundcloud: true
       twitch: true
       vimeo: true
       http: true
       local: false
-    filters:
-      volume: true
-      equalizer: true
-      karaoke: true
-      timescale: true
-      tremolo: true
-      vibrato: true
-      rotation: true
-      distortion: true
-      channelMix: true
-      lowPass: true
+    password: "youshallnotpass"
     bufferDurationMs: 400
-    frameBufferDurationMs: 5000
-    youtubePlaylistLoadLimit: 6
-    playerUpdateInterval: 5
+    frameBufferDurationMs: 10000
+    youtubePlaylistLoadLimit: 3
+    opusEncodingQuality: 5
+    resamplingQuality: MEDIUM
+    trackStuckThresholdMs: 5000
+    playerUpdateInterval: 3
+    useSeekGhosting: true
     youtubeSearchEnabled: true
     soundcloudSearchEnabled: true
     gc-warnings: true
+  plugins:
+    # YouTube source - https://github.com/lavalink-devs/youtube-source
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.16.0"
+      snapshot: false
+    # LavaSrc - Spotify, Deezer, Apple Music, etc - https://github.com/topi314/LavaSrc
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.1"
+      repository: "https://maven.lavalink.dev/releases"
+    # LavaSearch - Better search - https://github.com/topi314/LavaSearch
+    - dependency: "com.github.topi314.lavasearch:lavasearch-plugin:1.0.0"
+      repository: "https://maven.lavalink.dev/releases"
+    # DuncteBot - TikTok, Reddit, etc - https://github.com/DuncteBot/skybot-lavalink-plugin
+    - dependency: "com.dunctebot:skybot-lavalink-plugin:1.7.0"
+      repository: "https://maven.lavalink.dev/releases"
+    # LavaLyrics - Lyrics support - https://github.com/topi314/LavaLyrics
+    - dependency: "com.github.topi314.lavalyrics:lavalyrics-plugin:1.1.0"
+      repository: "https://maven.lavalink.dev/releases"
+    # Java Lyrics - More lyrics - https://github.com/DuncteBot/java-timed-lyrics
+    - dependency: "me.duncte123:java-lyrics-plugin:1.6.6"
+      repository: "https://maven.lavalink.dev/releases"
 
 metrics:
   prometheus:
     enabled: false
     endpoint: /metrics
 
+sentry:
+  dsn: ""
+  environment: ""
+  tags: {}
+
 logging:
   level:
     root: INFO
-    lavalink: DEBUG  # Enable DEBUG logging for troubleshooting voice connections
-    dev.lavalink.youtube: DEBUG  # Enable DEBUG logging for YouTube plugin OAuth
-    dev.lavalink.youtube.http.YoutubeOauth2Handler: INFO  # OAuth handler logging (recommandé par la doc)
-    # Uncomment below for even more detailed logging if needed:
-    # lavalink.server.io.SocketContext: TRACE  # See all WebSocket messages
-    # com.sedmelluq.discord.lavaplayer.tools.ExceptionTools: DEBUG  # Log track exceptions
-  # Log all requests to the REST API for debugging
+    lavalink: INFO
+    dev.lavalink.youtube: INFO
+    lavalink.server.config.SentryConfiguration: ERROR
+    io.undertow.websockets.jsr: ERROR
   request:
     enabled: true
     includeClientInfo: true
@@ -55,23 +83,176 @@ logging:
     includePayload: true
 
 plugins:
+  # ==================== LYRICS ====================
+  lyrics:
+    countryCode: FR
+  lavalyrics:
+    sources:
+      - spotify
+      - youtube
+
+  # ==================== YOUTUBE ====================
   youtube:
     enabled: true
     allowSearch: true
     allowDirectVideoIds: true
-    allowPlaylists: true
-    allowChannels: true
-    # Clients compatibles OAuth : TV et TVHTML5EMBEDDED
-    # Ces clients sont nécessaires pour utiliser OAuth
-    clients:
-      - TV
-      - TVHTML5EMBEDDED
-      - WEB
-      - ANDROID_VR
-    # OAuth configuration
-    # ⚠️ IMPORTANT : OAuth est REQUIS pour la plupart des vidéos YouTube
-    # Le plugin affiche un code dans les logs : allez sur https://www.google.com/device
-    # et entrez le code pour compléter le flux OAuth
+    allowDirectPlaylistIds: true
+    # Remote cipher for signature deciphering
+    # Using local yt-cipher container for full control
+    # https://github.com/kikkia/yt-cipher
+    remoteCipher:
+      userAgent: "discordbot"
+      url: "http://yt-cipher:8001"
+      password: "youshallnotpass"
+    # OAuth - your refresh token
     oauth:
-      enabled: false
-      refreshToken: "1//03qjdLUu6Jy9VCgYIARAAGAMSNwF-L9IrrVroAXZdKhZ2QBf3D60dcDty32fsKoXaEviIL92xL9TKo1HYkxFB1GjY-td75Qi5oyk"
+      enabled: true
+      refreshToken: "1//03johQ53eUlCDCgYIARAAGAMSNwF-L9IrXPaBAVu7koDtHpka80GBZvfUWUgPn8p8L9_ay4U99zBfiaBI0v33bVFT9SWDlxWFzd8"
+    # Client configuration following lavamusic pattern
+    # Reference: https://github.com/botxlab/lavamusic/blob/main/Lavalink/example.application.yml
+    clients:
+      - "ANDROID_MUSIC"
+      - "MUSIC"
+      - "WEB"
+      - "WEBEMBEDDED"
+      - "TVHTML5EMBEDDED"
+    # Per-client options
+    ANDROID_MUSIC:
+      playlistLoading: false
+      videoLoading: true
+      searching: true
+      playback: true
+    MUSIC:
+      playlistLoading: false
+      videoLoading: false
+      searching: true
+      playback: false
+    WEB:
+      playlistLoading: false
+      videoLoading: true
+      searching: true
+      playback: true
+    WEBEMBEDDED:
+      playlistLoading: false
+      videoLoading: false
+      searching: false
+      playback: true
+    TVHTML5EMBEDDED:
+      playlistLoading: false
+      videoLoading: false
+      searching: false
+      playback: true
+
+  # ==================== LAVASRC ====================
+  # Reference: https://github.com/topi314/LavaSrc
+  lavasrc:
+    providers:
+      # Search providers in order of priority (ISRC first, then queries)
+      - 'ytsearch:"%ISRC%"'    # YouTube with ISRC
+      - "ytsearch:%QUERY%"     # YouTube search
+      - "scsearch:%QUERY%"     # SoundCloud search
+      - "spsearch:%QUERY%"     # Spotify search
+    sources:
+      spotify: true       # ✅ Works with anonymous tokens
+      applemusic: false   # ❌ Requires mediaAPIToken (Apple Developer account)
+      deezer: false       # ❌ Requires masterDecryptionKey (disabled)
+      jiosaavn: false     # ❌ Requires decryption secretKey
+      pandora: false      # ❌ Requires csrfToken (US only)
+      yandexmusic: false  # ❌ Requires accessToken
+      flowerytts: true    # ✅ Text-to-speech - no credentials needed
+      youtube: true       # ✅ YouTube via LavaSearch
+      tidal: false        # ❌ Requires token
+      vkmusic: false      # ❌ Requires userToken
+      qobuz: false        # ❌ Requires userOauthToken
+    lyrics-sources:
+      spotify: true
+      youtube: true
+      lrcLib: true        # LRC Library - free lyrics
+
+    # ==================== SPOTIFY ====================
+    # Works without credentials using anonymous tokens!
+    spotify:
+      preferAnonymousToken: true
+      countryCode: "FR"
+      playlistLoadLimit: 6
+      albumLoadLimit: 3
+      resolveArtistsInSearch: true
+      localFiles: false
+      # For premium features (better rate limits, lyrics), add Spotify Developer credentials:
+      # Get them at: https://developer.spotify.com/dashboard
+      # clientId: "your_spotify_client_id"
+      # clientSecret: "your_spotify_client_secret"
+      # spDc: "your_sp_dc_cookie"  # For Spotify lyrics (from browser cookies)
+
+    # ==================== DEEZER (DISABLED) ====================
+    # Requires masterDecryptionKey to work - uncomment if you have it
+    # deezer:
+    #   countryCode: "FR"
+    #   masterDecryptionKey: "your_deezer_master_key"  # Required
+    #   arl: "your_deezer_arl_cookie"  # From browser cookies after login
+    #   formats: ["FLAC", "MP3_320", "MP3_256", "MP3_128", "MP3_64", "AAC_64"]
+
+    # ==================== YOUTUBE ====================
+    youtube:
+      countryCode: "FR"
+      playlistLoadLimit: 3
+      albumLoadLimit: 2
+      artistLoadLimit: 1
+
+    # ==================== FLOWERY TTS ====================
+    # Free text-to-speech - https://flowery.pw
+    flowerytts:
+      voice: "Emma"           # Default voice (see https://api.flowery.pw/v1/tts/voices)
+      translate: false        # Translate to voice's native language
+      silence: 0              # Silence in ms (0-10000)
+      speed: 1.0              # Speed (0.5-10.0)
+      audioFormat: "mp3"      # mp3, ogg_opus, ogg_vorbis, aac, wav, flac
+
+    # ==================== PREMIUM SOURCES ====================
+    # Uncomment and configure if you have credentials:
+    #
+    # applemusic:
+    #   countryCode: "FR"
+    #   mediaAPIToken: "your_apple_music_jwt_token"  # Requires Apple Developer account
+    #   playlistLoadLimit: 3
+    #   albumLoadLimit: 3
+    #
+    # tidal:
+    #   countryCode: "FR"
+    #   token: "your_tidal_token"  # See: https://github.com/topi314/LavaSrc#tidal
+    #   searchLimit: 6
+    #
+    # qobuz:
+    #   userOauthToken: "your_qobuz_oauth_token"  # See: https://github.com/topi314/LavaSrc#qobuz
+    #
+    # yandexmusic:
+    #   accessToken: "your_yandex_access_token"
+    #
+    # vkmusic:
+    #   userToken: "your_vk_user_token"  # See: https://github.com/topi314/LavaSrc#vk-music
+    #   playlistLoadLimit: 1
+    #   artistLoadLimit: 1
+    #   recommendationsLoadLimit: 10
+    #
+    # jiosaavn:
+    #   decryption:
+    #     secretKey: "your_jiosaavn_secret_key"
+    #     algorithm: "DES"
+    #     transformation: "DES/ECB/PKCS5Padding"
+    #
+    # pandora:
+    #   csrfToken: "your_pandora_csrf_token"  # US only
+    #   searchLimit: 6
+
+  # ==================== DUNCTEBOT ====================
+  dunctebot:
+    ttsLanguage: "fr-FR"
+    sources:
+      getyarn: true     # getyarn.io clips
+      clypit: true      # clyp.it audio
+      tts: true         # speak:text command
+      reddit: true      # Reddit videos
+      ocremix: true     # ocremix.org game remixes
+      tiktok: true      # TikTok videos
+      mixcloud: true    # Mixcloud streams
+      soundgasm: true   # soundgasm.net

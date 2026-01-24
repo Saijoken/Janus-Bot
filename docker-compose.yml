@@ -36,18 +36,44 @@ services:
       -c work_mem=4MB
       -c min_wal_size=80MB
       -c max_wal_size=1GB
+  yt-cipher:
+    build:
+      context: ./yt-cipher-src
+      dockerfile: Dockerfile
+    container_name: yt-cipher
+    restart: unless-stopped
+    # Fast shutdown (Deno doesn't handle SIGTERM well)
+    stop_grace_period: 2s
+    environment:
+      # API token for authentication (optional but recommended)
+      - API_TOKEN=${YT_CIPHER_TOKEN:-youshallnotpass}
+      # Port (default 8001)
+      - PORT=8001
+      # Max worker threads
+      - MAX_THREADS=2
+      # Cache size for player scripts
+      - PREPROCESSED_CACHE_SIZE=150
+    networks:
+      - discordbot-network
+    expose:
+      - 8001
 
   lavalink:
-    image: ghcr.io/lavalink-devs/lavalink:4-alpine
+    build:
+      context: ./lavalink
+      dockerfile: Dockerfile
+    image: lavalink-custom:latest
     container_name: lavalink
     restart: unless-stopped
+    stop_grace_period: 5s
+    depends_on:
+      yt-cipher:
+        condition: service_started
     environment:
       # Set Java options (512MB heap size)
       - _JAVA_OPTIONS=-Xmx512M
       # Set password for lavalink (can also be set in application.yml)
       - LAVALINK_SERVER_PASSWORD=youshallnotpass
-      # Optional: set server port (default is 2333, already set in application.yml)
-      # - SERVER_PORT=2333
     volumes:
       # Mount application.yml from the same directory
       - ./lavalink/application.yml:/opt/Lavalink/application.yml
@@ -68,6 +94,7 @@ services:
       dockerfile: Dockerfile
     container_name: discordbot
     restart: unless-stopped
+    stop_grace_period: 5s
     depends_on:
       postgres:
         condition: service_healthy
@@ -88,6 +115,10 @@ services:
       - LAVALINK_HOST=lavalink
       - LAVALINK_PORT=2333
       - LAVALINK_PASSWORD=youshallnotpass
+      - GENIUS_API_KEY=${GENIUS_API_KEY:-}
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
+      - MUSIC_DEFAULT_PLATFORM=${MUSIC_DEFAULT_PLATFORM:-scsearch}
     volumes:
       # Persist the economy.json database
       - ./economy.json:/app/economy.json

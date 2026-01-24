@@ -54,15 +54,16 @@ async function updateMemberCount(guild) {
     const channelId = process.env.COUNTER_CHANNEL_ID;
     
     if (!channelId) {
-        console.warn('COUNTER_CHANNEL_ID not set in environment variables');
-        return;
+        return; // Silently skip if no channel ID configured
     }
 
     try {
-        const channel = await guild.channels.fetch(channelId);
+        // Check if this guild has the counter channel (avoid fetching from wrong guild)
+        const channel = guild.channels.cache.get(channelId);
         
         if (!channel) {
-            console.error(`Channel with ID ${channelId} not found in guild ${guild.name}`);
+            // Channel not in this guild's cache - skip silently
+            // This is normal when bot is in multiple guilds but channel is only in one
             return;
         }
 
@@ -79,7 +80,7 @@ async function updateMemberCount(guild) {
         if (error.code === 50001) {
             console.error(`[${guild.name}] Missing access to channel ${channelId}`);
         } else if (error.code === 10003) {
-            console.error(`[${guild.name}] Channel ${channelId} not found`);
+            // Channel not found - skip silently
         } else {
             console.error(`[${guild.name}] Error updating member count:`, error.message);
         }
@@ -224,6 +225,10 @@ client.on('messageCreate', async (message) => {
             case 'lyrics':
             case 'ly':
                 await musicCommands.lyricsCommand(message);
+                break;
+            case 'search':
+            case 'sr':
+                await musicCommands.searchCommand(message, args);
                 break;
             default:
                 // Silently ignore unknown commands to avoid spam
@@ -571,7 +576,7 @@ client.once('clientReady', async () => {
     // Initialize Poru with proper configuration (following AeroX example)
     poruClient = new Poru(client, nodes, {
         library: 'discord.js',
-        defaultPlatform: process.env.MUSIC_DEFAULT_PLATFORM || 'youtube',
+        defaultPlatform: process.env.MUSIC_DEFAULT_PLATFORM || 'scsearch',
         resumeKey: 'DiscordBot',
         resumeTimeout: 60,
         reconnectTimeout: 10000,
@@ -629,6 +634,7 @@ client.once('clientReady', async () => {
     });
     
     poruClient.on('playerEmpty', (player) => {
+        console.log('📭 playerEmpty event triggered - voice channel is empty');
         const embed = new EmbedBuilder()
             .setDescription('🔇 Le canal vocal est vide. Je me déconnecte...')
             .setColor(0xff9900);
@@ -640,6 +646,7 @@ client.once('clientReady', async () => {
     });
     
     poruClient.on('queueEnd', (player) => {
+        console.log('🏁 queueEnd event triggered - queue is empty, current track:', player.currentTrack?.info?.title || 'none');
         const embed = new EmbedBuilder()
             .setDescription('✅ La file d\'attente est terminée !')
             .setColor(0x00ff00);
@@ -648,6 +655,121 @@ client.once('clientReady', async () => {
         if (channel) channel.send({ embeds: [embed] }).catch(() => {});
         
         player.destroy();
+    });
+    
+    poruClient.on('trackEnd', (player, track, reason) => {
+        const position = player.position || 0;
+        const duration = track?.info?.length || 0;
+        const percentPlayed = duration > 0 ? Math.round((position / duration) * 100) : 0;
+        console.log(`⏹️ trackEnd event: "${track?.info?.title || 'unknown'}" - Reason: ${reason?.reason || reason || 'unknown'}`);
+        console.log(`   Position: ${Math.round(position/1000)}s / ${Math.round(duration/1000)}s (${percentPlayed}% played)`);
+        console.log(`   Queue length: ${player.queue?.length || 0}`);
+        
+        // If track ended early (less than 90% played) and reason is not user action, it might be a stream issue
+        if (percentPlayed < 90 && reason?.reason !== 'stopped' && reason?.reason !== 'replaced') {
+            console.warn(`⚠️ Track may have ended prematurely! Only ${percentPlayed}% was played.`);
+        }
+    });
+    
+    poruClient.on('trackException', (player, track, error) => {
+        console.error('Track exception:', error);
+        
+        const errorMessage = error?.message || error?.exception?.message || 'Erreur inconnue';
+        let userMessage = '❌ Erreur lors de la lecture de la piste.';
+        
+        if (errorMessage.includes('login') || errorMessage.includes('requires login')) {
+            userMessage = '❌ Cette vidéo nécessite une connexion YouTube et ne peut pas être lue. Veuillez essayer une autre vidéo.';
+        } else if (errorMessage.includes('unavailable') || errorMessage.includes('private')) {
+            userMessage = '❌ Cette vidéo n\'est pas disponible (privée ou supprimée).';
+        } else if (errorMessage.includes('age-restricted')) {
+            userMessage = '❌ Cette vidéo est restreinte par âge et ne peut pas être lue.';
+        }
+        
+        const embed = new EmbedBuilder()
+            .setDescription(`${userMessage}\n\n**Piste:** ${track?.info?.title || 'Inconnue'}`)
+            .setColor(0xff0000);
+
+        const channel = client.channels.cache.get(player.textChannel);
+        if (channel) channel.send({ embeds: [embed] }).catch(() => {});
+        
+        // Skip to next track if available
+        if (player.queue.length > 0) {
+            player.skip();
+        } else {
+            player.destroy();
+        }
+    });
+    
+    // Track stuck retry tracking
+    const stuckRetries = new Map();
+    
+    poruClient.on('trackError', async (player, track, error) => {
+        console.error('Track error:', error);
+        
+        const isStuckEvent = error?.type === 'TrackStuckEvent';
+        const trackId = track?.encoded || track?.info?.identifier || 'unknown';
+        
+        // For stuck events, try to resume playback instead of destroying
+        if (isStuckEvent) {
+            const retryCount = stuckRetries.get(trackId) || 0;
+            
+            if (retryCount < 2) {
+                stuckRetries.set(trackId, retryCount + 1);
+                console.log(`🔄 Track stuck, attempting resume (retry ${retryCount + 1}/2)...`);
+                
+                try {
+                    // Get current position and seek back slightly to retry
+                    const currentPos = track?.info?.position || error?.position || 0;
+                    const seekPos = Math.max(0, currentPos - 5000); // Go back 5 seconds
+                    
+                    await player.seekTo(seekPos);
+                    if (player.isPaused) {
+                        await player.pause(false);
+                    }
+                    
+                    const channel = client.channels.cache.get(player.textChannel);
+                    if (channel && retryCount === 0) {
+                        const embed = new EmbedBuilder()
+                            .setDescription(`⚠️ Problème de streaming détecté, reprise en cours...\n**Piste:** ${track?.info?.title || 'Inconnue'}`)
+                            .setColor(0xffa500);
+                        channel.send({ embeds: [embed] }).catch(() => {});
+                    }
+                    return;
+                } catch (e) {
+                    console.error('Resume failed:', e);
+                }
+            }
+            
+            // Clear retry count after max retries
+            stuckRetries.delete(trackId);
+        }
+        
+        const errorMessage = error?.message || error?.exception?.message || 'Erreur inconnue';
+        let userMessage = isStuckEvent 
+            ? '⚠️ La piste a rencontré un problème de streaming et a été ignorée.'
+            : '❌ Erreur lors de la lecture de la piste.';
+        
+        if (errorMessage.includes('login') || errorMessage.includes('requires login')) {
+            userMessage = '❌ Cette vidéo nécessite une connexion YouTube et ne peut pas être lue. Veuillez essayer une autre vidéo.';
+        } else if (errorMessage.includes('unavailable') || errorMessage.includes('private')) {
+            userMessage = '❌ Cette vidéo n\'est pas disponible (privée ou supprimée).';
+        } else if (errorMessage.includes('age-restricted')) {
+            userMessage = '❌ Cette vidéo est restreinte par âge et ne peut pas être lue.';
+        }
+        
+        const embed = new EmbedBuilder()
+            .setDescription(`${userMessage}\n\n**Piste:** ${track?.info?.title || 'Inconnue'}`)
+            .setColor(isStuckEvent ? 0xffa500 : 0xff0000);
+
+        const channel = client.channels.cache.get(player.textChannel);
+        if (channel) channel.send({ embeds: [embed] }).catch(() => {});
+        
+        // Skip to next track if available
+        if (player.queue.length > 0) {
+            player.skip();
+        } else {
+            player.destroy();
+        }
     });
     
     // Set player instance in music commands (now that client is ready)

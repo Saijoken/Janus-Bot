@@ -1,5 +1,6 @@
-import { EmbedBuilder } from 'discord.js';
+import { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } from 'discord.js';
 import { getLyrics, searchSong } from 'genius-lyrics-api';
+// Node.js 18+ has native fetch
 
 // Get the Poru client instance
 let poruClient = null;
@@ -25,7 +26,18 @@ function formatDuration(ms) {
 }
 
 /**
+ * Check if a SoundCloud track is a preview (30 seconds only)
+ * Previews have /preview/ in the identifier URL
+ */
+function isSoundCloudPreview(track) {
+    if (!track || track.info?.sourceName !== 'soundcloud') return false;
+    const identifier = track.info?.identifier || '';
+    return identifier.includes('/preview/') || identifier.includes('/preview%2F');
+}
+
+/**
  * Play command - Add song to queue and play
+ * Based on AeroX-CV2-Music-Bot structure
  */
 export async function playCommand(message, args) {
     if (!poruClient) {
@@ -40,87 +52,244 @@ export async function playCommand(message, args) {
     }
 
     if (args.length === 0) {
-        await message.reply('❌ Veuillez fournir une URL YouTube ou un terme de recherche !\nExemple: `$play https://www.youtube.com/watch?v=...` ou `$play nom de la chanson`');
+        await message.reply('❌ Veuillez fournir une URL YouTube/Spotify ou un terme de recherche !\nExemple: `$play https://www.youtube.com/watch?v=...` ou `$play nom de la chanson`');
         return;
     }
 
     const query = args.join(' ');
+
+    // Check Spotify configuration if query contains Spotify
+    if (query.toLowerCase().includes('spotify') && (!process.env.SPOTIFY_CLIENT_ID || !process.env.SPOTIFY_CLIENT_SECRET)) {
+        await message.reply('❌ Spotify n\'est pas configuré par le propriétaire du bot.');
+        return;
+    }
 
     try {
         await message.channel.sendTyping();
 
         console.log('🔍 Recherche de:', query);
         
-        // Detect source based on query (Spotify URL or YouTube URL)
-        let source = 'youtube';
-        if (query.includes('open.spotify.com') || query.includes('spotify.com')) {
-            source = 'spotify';
-        } else if (query.includes('youtube.com') || query.includes('youtu.be')) {
-            source = 'youtube';
-        } else {
-            // Default to YouTube for search queries
-            source = 'youtube';
-        }
-        
         // Resolve tracks using Poru
-        const result = await poruClient.resolve({
-            query: query,
-            source: source,
-        });
-        
-        if (!result || (!result.tracks && !result.loadType)) {
-            await message.reply('❌ Aucun résultat trouvé pour votre recherche !');
+        let res;
+        try {
+            // Check if query already has a search prefix
+            const searchPrefixMap = {
+                'ytsearch:': 'ytsearch',
+                'ytmsearch:': 'ytmsearch',
+                'scsearch:': 'scsearch',
+                'spsearch:': 'spsearch',
+                'amsearch:': 'amsearch',
+                'dzsearch:': 'dzsearch',
+                'dzisrc:': 'dzisrc',
+                'ymsearch:': 'ymsearch',
+            };
+            
+            // Check for TTS prefixes (these should be passed as-is to Lavalink)
+            const ttsPrefixes = ['speak:', 'tts:', 'ftts:'];
+            const isTTS = ttsPrefixes.some(prefix => query.toLowerCase().startsWith(prefix));
+            
+            // Check for search prefixes
+            let detectedPrefix = null;
+            for (const [prefix, source] of Object.entries(searchPrefixMap)) {
+                if (query.toLowerCase().startsWith(prefix)) {
+                    detectedPrefix = { prefix, source };
+                    break;
+                }
+            }
+            
+            let resolveOptions = { requester: message.author };
+            
+            if (isTTS) {
+                // TTS queries - pass directly without any source
+                resolveOptions.query = query;
+                console.log('🔍 TTS query:', query);
+            } else if (detectedPrefix) {
+                // Query has a search prefix - extract and use it properly
+                const searchTerm = query.substring(detectedPrefix.prefix.length);
+                resolveOptions.query = searchTerm;
+                resolveOptions.source = detectedPrefix.source;
+                console.log('🔍 Prefixed search:', detectedPrefix.source, 'query:', searchTerm);
+            } else if (query.includes('open.spotify.com') || query.includes('spotify.com')) {
+                resolveOptions.query = query;
+                resolveOptions.source = 'spotify';
+                console.log('🔍 Spotify URL:', query);
+            } else if (query.includes('youtube.com') || query.includes('youtu.be')) {
+                resolveOptions.query = query;
+                resolveOptions.source = 'youtube';
+                console.log('🔍 YouTube URL:', query);
+            } else if (query.includes('soundcloud.com')) {
+                resolveOptions.query = query;
+                resolveOptions.source = 'soundcloud';
+                console.log('🔍 SoundCloud URL:', query);
+            } else if (query.startsWith('http://') || query.startsWith('https://')) {
+                // Generic URL - let Lavalink handle it (no source)
+                resolveOptions.query = query;
+                console.log('🔍 Direct URL:', query);
+            } else {
+                // Plain text search - use SoundCloud search (default)
+                resolveOptions.query = query;
+                resolveOptions.source = 'scsearch';
+                console.log('🔍 SoundCloud search:', query);
+            }
+            
+            res = await poruClient.resolve(resolveOptions);
+            // Debug logging
+            console.log('📊 Poru resolve result:', {
+                loadType: res?.loadType,
+                tracksCount: res?.tracks?.length || 0,
+                playlistInfo: res?.playlistInfo,
+                exception: res?.exception,
+            });
+        } catch (e) {
+            console.error('Poru resolve error:', e);
+            await message.reply(`❌ Échec de la recherche: ${e?.message || 'Erreur inconnue'}`);
             return;
+        }
+
+        // Handle Spotify playlist specifically
+        const isSpotifyPlaylist = /^https?:\/\/open\.spotify\.com\/playlist\/[a-zA-Z0-9]+/i.test(query.trim());
+        if (isSpotifyPlaylist) {
+            if (!res || res.loadType !== 'PLAYLIST_LOADED' || !Array.isArray(res.tracks) || res.tracks.length === 0) {
+                await message.reply('❌ Aucun résultat trouvé ou playlist invalide.');
+                return;
+            }
+
+            let player = poruClient.players.get(message.guild.id);
+            if (!player) {
+                player = await poruClient.createConnection({
+                    guildId: message.guild.id,
+                    voiceChannel: member.voice.channel.id,
+                    textChannel: message.channel.id,
+                    deaf: true,
+                });
+            } else {
+                player.textChannel = message.channel.id;
+            }
+
+            if (player.autoplayEnabled === undefined) player.autoplayEnabled = false;
+
+            for (const track of res.tracks) {
+                track.info.requester = message.author;
+                player.queue.add(track);
+            }
+
+            if (!player.isPlaying && player.isConnected) {
+                await player.play();
+            }
+
+            const embed = new EmbedBuilder()
+                .setDescription(`## 🎵 Playlist ${res.playlistInfo?.name || 'Spotify Playlist'}\nAjout de **${res.tracks.length}** pistes à la file d'attente !`)
+                .setColor(0x1db954);
+
+            await message.reply({ embeds: [embed] });
+            return;
+        }
+
+        // Handle search results - filter out shorts (tracks < 70000ms)
+        if (res.loadType === 'search') {
+            const filteredTracks = res.tracks.filter((track) => !track.info.isStream && track.info.length > 70000);
+            if (!filteredTracks.length) {
+                await message.reply('❌ Aucun résultat trouvé (shorts filtrés).');
+                return;
+            }
+            res.tracks = filteredTracks;
+        }
+
+        // Handle error load type
+        if (res.loadType === 'error') {
+            await message.reply(`❌ Échec du chargement: ${res.exception?.message || 'Erreur inconnue'}`);
+            return;
+        }
+
+        // Handle empty load type
+        if (res.loadType === 'empty') {
+            await message.reply('❌ Aucun résultat trouvé.');
+            return;
+        }
+
+        // Check for SoundCloud preview and prepare warning
+        let isPreviewTrack = false;
+        if (res.tracks && res.tracks.length > 0) {
+            isPreviewTrack = isSoundCloudPreview(res.tracks[0]);
+            if (isPreviewTrack) {
+                console.log('⚠️ SoundCloud preview detected for:', res.tracks[0].info?.title);
+            }
         }
 
         // Get or create player for this guild
         let player = poruClient.players.get(message.guild.id);
-        
+        console.log('🎮 Player exists:', !!player);
         if (!player) {
+            console.log('🔌 Creating new connection to voice channel:', member.voice.channel.id);
             player = await poruClient.createConnection({
                 guildId: message.guild.id,
                 voiceChannel: member.voice.channel.id,
                 textChannel: message.channel.id,
                 deaf: true,
             });
+            console.log('✅ Player created, isConnected:', player?.isConnected);
         } else {
-            // Update text channel if changed
             player.textChannel = message.channel.id;
         }
 
-        // Handle different load types
-        if (result.loadType === 'PLAYLIST_LOADED') {
-            // Playlist
-            for (const track of result.tracks) {
+        if (player.autoplayEnabled === undefined) player.autoplayEnabled = false;
+
+        // Handle playlist load type
+        if (res.loadType === 'playlist' || res.loadType === 'PLAYLIST_LOADED') {
+            for (const track of res.tracks) {
+                track.info.requester = message.author;
                 player.queue.add(track);
             }
-            
+
+            if (!player.isPlaying && player.isConnected) {
+                await player.play();
+            }
+
             const embed = new EmbedBuilder()
-                .setDescription(`✅ **${result.playlistInfo.name}** (${result.tracks.length} chansons) ajoutée à la file d'attente !`)
-                .setColor(0x00ff00)
-                .setThumbnail(result.tracks[0]?.info?.image || null);
+                .setDescription(`## 🎵 Playlist ${res.playlistInfo?.name || 'Playlist'}\nAjout de **${res.tracks.length}** pistes à la file d'attente !`)
+                .setColor(0x00ff00);
 
             await message.reply({ embeds: [embed] });
-        } else if (result.loadType === 'SEARCH_RESULT' || result.loadType === 'TRACK_LOADED') {
-            // Single track
-            const track = result.tracks[0];
-            player.queue.add(track);
-            
-            const embed = new EmbedBuilder()
-                .setDescription(`✅ **${track.info.title}** ajouté à la file d'attente !`)
-                .setColor(0x00ff00)
-                .setThumbnail(track.info.image || null);
-
-            await message.reply({ embeds: [embed] });
-        } else {
-            await message.reply('❌ Aucun résultat trouvé pour votre recherche !');
             return;
         }
 
-        // Start playing if not already playing
-        if (!player.isPlaying && !player.isPaused) {
-            await player.play();
+        // Handle single track (SEARCH_RESULT, TRACK_LOADED, track, search)
+        if (res.tracks && res.tracks.length > 0) {
+            const track = res.tracks[0];
+            console.log('🎵 Track found:', track.info?.title);
+            
+            track.info.requester = message.author;
+            player.queue.add(track);
+            console.log('📝 Track added to queue, queue length:', player.queue.length);
+
+            console.log('🔊 Player state - isPlaying:', player.isPlaying, 'isConnected:', player.isConnected, 'isPaused:', player.isPaused);
+            if (!player.isPlaying && player.isConnected) {
+                console.log('▶️ Starting playback...');
+                await player.play();
+                console.log('✅ Playback started');
+            }
+
+            // Build embed with preview warning if applicable
+            const embed = new EmbedBuilder()
+                .setThumbnail(track.info.artworkUrl || null);
+            
+            if (isPreviewTrack) {
+                embed.setTitle('⚠️ Aperçu SoundCloud (30s)')
+                    .setDescription(`Ajout de **[${track.info.title}](${track.info.uri})** à la file d'attente !\n\n` +
+                        `⚠️ *Ce titre n'est disponible qu'en aperçu de 30 secondes.*\n` +
+                        `💡 Pour le titre complet: \`$play ytsearch:${track.info.title} ${track.info.author}\``)
+                    .setColor(0xff9900);
+            } else {
+                embed.setDescription(`✅ Ajout de **[${track.info.title}](${track.info.uri})** à la file d'attente !`)
+                    .setColor(0x00ff00);
+            }
+
+            await message.reply({ embeds: [embed] });
+            return;
         }
+
+        // Fallback
+        await message.reply('❌ Aucun résultat trouvé pour votre recherche !');
     } catch (error) {
         console.error('Error in play command:', error);
         let errorMessage = error.message || 'Erreur inconnue';
@@ -134,6 +303,249 @@ export async function playCommand(message, args) {
         }
         
         await message.reply(`❌ Erreur: ${errorMessage}`);
+    }
+}
+
+/**
+ * Search command - Show multiple results and let user choose
+ */
+export async function searchCommand(message, args) {
+    if (!poruClient) {
+        await message.reply('❌ Le bot de musique n\'est pas initialisé !');
+        return;
+    }
+
+    if (!args || args.length === 0) {
+        await message.reply('❌ Veuillez spécifier une recherche ! Usage: `$search <terme>`');
+        return;
+    }
+
+    const query = args.join(' ');
+
+    const member = message.member;
+    if (!member.voice.channel) {
+        await message.reply('❌ Vous devez être dans un canal vocal !');
+        return;
+    }
+
+    try {
+        // Determine search source
+        const searchPrefixMap = {
+            'ytsearch:': 'ytsearch',
+            'ytmsearch:': 'ytmsearch',
+            'scsearch:': 'scsearch',
+            'spsearch:': 'spsearch',
+            'amsearch:': 'amsearch',
+            'dzsearch:': 'dzsearch',
+            'ymsearch:': 'ymsearch',
+        };
+
+        let resolveOptions = { requester: message.author };
+        let detectedPrefix = null;
+        let sourceName = 'YouTube';
+
+        for (const [prefix, source] of Object.entries(searchPrefixMap)) {
+            if (query.toLowerCase().startsWith(prefix)) {
+                detectedPrefix = { prefix, source };
+                break;
+            }
+        }
+
+        if (detectedPrefix) {
+            const searchTerm = query.substring(detectedPrefix.prefix.length);
+            resolveOptions.query = searchTerm;
+            resolveOptions.source = detectedPrefix.source;
+            
+            // Set friendly source name
+            const sourceNames = {
+                'ytsearch': 'YouTube',
+                'ytmsearch': 'YouTube Music',
+                'scsearch': 'SoundCloud',
+                'spsearch': 'Spotify',
+                'amsearch': 'Apple Music',
+                'dzsearch': 'Deezer',
+                'ymsearch': 'Yandex Music',
+            };
+            sourceName = sourceNames[detectedPrefix.source] || detectedPrefix.source;
+        } else {
+            resolveOptions.query = query;
+            resolveOptions.source = 'scsearch';
+            sourceName = 'SoundCloud';
+        }
+
+        const res = await poruClient.resolve(resolveOptions);
+
+        if (!res || res.loadType === 'empty' || res.loadType === 'error' || !res.tracks?.length) {
+            await message.reply('❌ Aucun résultat trouvé.');
+            return;
+        }
+
+        // Filter out shorts
+        let tracks = res.tracks.filter(t => !t.info.isStream && t.info.length > 30000);
+        
+        if (!tracks.length) {
+            await message.reply('❌ Aucun résultat valide trouvé.');
+            return;
+        }
+
+        // Smart sorting based on word matching
+        // Split query into words (filter out short words like "the", "a", etc.)
+        const queryWords = query.toLowerCase()
+            .split(/\s+/)
+            .filter(w => w.length > 2 && !['the', 'and', 'for', 'feat', 'with'].includes(w));
+
+        // Calculate match score for a track
+        const getMatchScore = (track) => {
+            const title = track.info.title.toLowerCase();
+            const author = track.info.author.toLowerCase();
+            const combined = `${title} ${author}`;
+            let score = 0;
+
+            // Count matching words (each word = 10 points)
+            for (const word of queryWords) {
+                if (combined.includes(word)) score += 10;
+            }
+
+            // Bonus: Author name contains query words (important for "artist - song" searches)
+            for (const word of queryWords) {
+                if (author.includes(word)) score += 15; // Extra bonus for author match
+            }
+
+            // Bonus: Title contains query words
+            for (const word of queryWords) {
+                if (title.includes(word)) score += 5;
+            }
+
+            // Bonus: Official/verified
+            if (author.includes('official') || title.includes('official')) score += 20;
+
+            // Bonus: Exact author match (e.g., "toby fox" in author)
+            const authorWords = queryWords.slice(0, 2).join(' '); // First 2 words often = artist name
+            if (author.includes(authorWords) && authorWords.length > 3) score += 30;
+
+            return score;
+        };
+
+        // Sort by score (highest first), keep original order for ties
+        tracks.sort((a, b) => {
+            const scoreA = getMatchScore(a);
+            const scoreB = getMatchScore(b);
+            return scoreB - scoreA;
+        });
+
+        // Limit to 10 results after sorting
+        tracks = tracks.slice(0, 10);
+        
+        if (!tracks.length) {
+            await message.reply('❌ Aucun résultat trouvé.');
+            return;
+        }
+
+        // Number emojis for reactions
+        const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+        const cancelEmoji = '❌';
+
+        // Build result list with preview warnings
+        const resultList = tracks.map((track, index) => {
+            const duration = formatDuration(track.info.length);
+            const title = track.info.title.length > 40 ? track.info.title.substring(0, 37) + '...' : track.info.title;
+            const author = track.info.author.length > 18 ? track.info.author.substring(0, 15) + '...' : track.info.author;
+            const isPreview = isSoundCloudPreview(track);
+            const previewTag = isPreview ? ' ⚠️30s' : '';
+            return `${numberEmojis[index]} [${title}](${track.info.uri})${previewTag}\n┗ 👤 ${author} • ⏱️ ${duration}`;
+        }).join('\n\n');
+
+        const embed = new EmbedBuilder()
+            .setTitle(`🔍 Résultats de recherche - ${sourceName}`)
+            .setDescription(resultList)
+            .setColor(0x3498db)
+            .setFooter({ text: `Réagissez avec un numéro pour sélectionner • ${cancelEmoji} pour annuler • Expire dans 60s` });
+
+        const reply = await message.reply({ embeds: [embed] });
+
+        // Add reactions
+        const reactEmojis = numberEmojis.slice(0, tracks.length);
+        reactEmojis.push(cancelEmoji);
+        
+        for (const emoji of reactEmojis) {
+            await reply.react(emoji).catch(() => {});
+        }
+
+        // Wait for reaction
+        try {
+            const collected = await reply.awaitReactions({
+                filter: (reaction, user) => {
+                    return user.id === message.author.id && 
+                           (numberEmojis.includes(reaction.emoji.name) || reaction.emoji.name === cancelEmoji);
+                },
+                max: 1,
+                time: 60000,
+                errors: ['time']
+            });
+
+            const reaction = collected.first();
+            
+            // Remove all reactions
+            await reply.reactions.removeAll().catch(() => {});
+
+            if (reaction.emoji.name === cancelEmoji) {
+                const cancelEmbedMsg = new EmbedBuilder()
+                    .setDescription('❌ Recherche annulée.')
+                    .setColor(0xff0000);
+                await reply.edit({ embeds: [cancelEmbedMsg] });
+                return;
+            }
+
+            const selectedIndex = numberEmojis.indexOf(reaction.emoji.name);
+            if (selectedIndex === -1 || selectedIndex >= tracks.length) {
+                await reply.edit({ embeds: [new EmbedBuilder().setDescription('❌ Sélection invalide.').setColor(0xff0000)] });
+                return;
+            }
+
+            const selectedTrack = tracks[selectedIndex];
+
+            // Get or create player
+            let player = poruClient.players.get(message.guild.id);
+            if (!player) {
+                player = await poruClient.createConnection({
+                    guildId: message.guild.id,
+                    voiceChannel: member.voice.channel.id,
+                    textChannel: message.channel.id,
+                    deaf: true,
+                });
+            } else {
+                player.textChannel = message.channel.id;
+            }
+
+            if (player.autoplayEnabled === undefined) player.autoplayEnabled = false;
+
+            selectedTrack.info.requester = message.author;
+            player.queue.add(selectedTrack);
+
+            if (!player.isPlaying && player.isConnected) {
+                await player.play();
+            }
+
+            const confirmEmbed = new EmbedBuilder()
+                .setDescription(`## 🎵 Ajouté à la file d'attente\n[${selectedTrack.info.title}](${selectedTrack.info.uri})\n👤 ${selectedTrack.info.author} • ⏱️ ${formatDuration(selectedTrack.info.length)}`)
+                .setThumbnail(selectedTrack.info.artworkUrl || null)
+                .setColor(0x00ff00)
+                .setFooter({ text: `Demandé par ${message.author.username}`, iconURL: message.author.displayAvatarURL() });
+
+            await reply.edit({ embeds: [confirmEmbed] });
+
+        } catch (e) {
+            // Timeout or error
+            await reply.reactions.removeAll().catch(() => {});
+            const timeoutEmbed = new EmbedBuilder()
+                .setDescription('⏱️ Temps écoulé - recherche expirée.')
+                .setColor(0xff9900);
+            await reply.edit({ embeds: [timeoutEmbed] }).catch(() => {});
+        }
+
+    } catch (error) {
+        console.error('Error in search command:', error);
+        await message.reply(`❌ Erreur: ${error.message || 'Erreur inconnue'}`);
     }
 }
 
@@ -356,14 +768,9 @@ export async function leaveCommand(message) {
 }
 
 /**
- * Lyrics command - Get lyrics from Genius
+ * Lyrics command - Get lyrics from Lavalink or Genius
  */
 export async function lyricsCommand(message) {
-    if (!geniusApiKey) {
-        await message.reply('❌ L\'API Genius n\'est pas configurée !');
-        return;
-    }
-
     const player = poruClient?.players.get(message.guild.id);
     if (!player || !player.currentTrack) {
         await message.reply('❌ Aucune musique n\'est en cours de lecture !');
@@ -373,38 +780,126 @@ export async function lyricsCommand(message) {
     const track = player.currentTrack;
     const title = track.info.title;
     const author = track.info.author || 'Unknown';
+    const encodedTrack = track.encoded;
 
     try {
         await message.channel.sendTyping();
 
-        // Search for the song on Genius
-        const searchResults = await searchSong({
-            apiKey: geniusApiKey,
-            title: title,
-            artist: author,
-            optimizeQuery: true,
-        });
+        let lyrics = null;
+        let source = 'Lavalink';
+        let lyricsTitle = title;
+        let lyricsArtist = author;
 
-        if (!searchResults || searchResults.length === 0) {
+        // Try Lavalink lyrics plugins first
+        const lavalinkHost = process.env.LAVALINK_HOST || 'lavalink';
+        const lavalinkPort = process.env.LAVALINK_PORT || '2333';
+        const lavalinkPassword = process.env.LAVALINK_PASSWORD || 'youshallnotpass';
+
+        try {
+            // Try java-lyrics-plugin endpoint
+            const lyricsResponse = await fetch(
+                `http://${lavalinkHost}:${lavalinkPort}/v4/lyrics/${encodeURIComponent(encodedTrack)}`,
+                {
+                    headers: {
+                        'Authorization': lavalinkPassword
+                    }
+                }
+            );
+
+            if (lyricsResponse.ok) {
+                const lyricsData = await lyricsResponse.json();
+                if (lyricsData && lyricsData.lines && lyricsData.lines.length > 0) {
+                    // Format synced lyrics
+                    lyrics = lyricsData.lines.map(line => line.line).join('\n');
+                    source = lyricsData.source || 'Lavalink';
+                } else if (lyricsData && lyricsData.text) {
+                    lyrics = lyricsData.text;
+                    source = lyricsData.source || 'Lavalink';
+                }
+            }
+        } catch (lavalinkError) {
+            console.log('Lavalink lyrics not available, trying Genius...');
+        }
+
+        // Fallback to Genius if Lavalink didn't work
+        if (!lyrics && geniusApiKey) {
+            try {
+                // Search for the song on Genius API
+                const searchQuery = `${title} ${author}`.replace(/[^\w\s]/g, '').trim();
+                const searchUrl = `https://api.genius.com/search?q=${encodeURIComponent(searchQuery)}`;
+                
+                const searchResponse = await fetch(searchUrl, {
+                    headers: {
+                        'Authorization': `Bearer ${geniusApiKey}`
+                    }
+                });
+                
+                if (searchResponse.ok) {
+                    const searchData = await searchResponse.json();
+                    const hits = searchData?.response?.hits;
+                    
+                    if (hits && hits.length > 0) {
+                        const song = hits[0].result;
+                        lyricsTitle = song.title || title;
+                        lyricsArtist = song.primary_artist?.name || author;
+                        const lyricsUrl = song.url;
+                        
+                        // Fetch the lyrics page with browser-like headers
+                        const pageResponse = await fetch(lyricsUrl, {
+                            headers: {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                                'Accept-Language': 'en-US,en;q=0.5',
+                                'Accept-Encoding': 'gzip, deflate, br',
+                                'Connection': 'keep-alive',
+                                'Upgrade-Insecure-Requests': '1',
+                                'Sec-Fetch-Dest': 'document',
+                                'Sec-Fetch-Mode': 'navigate',
+                                'Sec-Fetch-Site': 'none',
+                                'Sec-Fetch-User': '?1',
+                                'Cache-Control': 'max-age=0'
+                            }
+                        });
+                        
+                        if (pageResponse.ok) {
+                            const html = await pageResponse.text();
+                            
+                            // Extract lyrics from HTML using regex patterns
+                            // Genius uses data-lyrics-container divs
+                            const lyricsMatches = html.match(/data-lyrics-container="true"[^>]*>([\s\S]*?)<\/div>/g);
+                            
+                            if (lyricsMatches && lyricsMatches.length > 0) {
+                                lyrics = lyricsMatches
+                                    .map(match => {
+                                        return match
+                                            .replace(/<br\s*\/?>/gi, '\n')
+                                            .replace(/<[^>]+>/g, '')
+                                            .replace(/&amp;/g, '&')
+                                            .replace(/&lt;/g, '<')
+                                            .replace(/&gt;/g, '>')
+                                            .replace(/&quot;/g, '"')
+                                            .replace(/&#x27;/g, "'")
+                                            .replace(/&#39;/g, "'")
+                                            .trim();
+                                    })
+                                    .join('\n\n');
+                                source = 'Genius';
+                            }
+                        }
+                    }
+                }
+            } catch (geniusError) {
+                console.log('Genius lyrics error:', geniusError.message);
+            }
+        }
+
+        if (!lyrics) {
             await message.reply(`❌ Aucune parole trouvée pour **${title}** par **${author}**`);
             return;
         }
 
-        // Get lyrics from the first result
-        const lyrics = await getLyrics({
-            apiKey: geniusApiKey,
-            title: searchResults[0].title,
-            artist: searchResults[0].artist.name,
-            optimizeQuery: true,
-        });
-
-        if (!lyrics) {
-            await message.reply(`❌ Impossible de récupérer les paroles pour **${title}**`);
-            return;
-        }
-
         // Split lyrics if too long (Discord limit is 4096 characters)
-        const maxLength = 4096 - 100; // Leave some margin
+        const maxLength = 4096 - 100;
         if (lyrics.length > maxLength) {
             const chunks = [];
             for (let i = 0; i < lyrics.length; i += maxLength) {
@@ -412,15 +907,14 @@ export async function lyricsCommand(message) {
             }
 
             const embed = new EmbedBuilder()
-                .setTitle(`🎵 Paroles: ${searchResults[0].title}`)
+                .setTitle(`🎵 Paroles: ${lyricsTitle}`)
                 .setDescription(chunks[0])
                 .setColor(0x1db954)
-                .setFooter({ text: `Par ${searchResults[0].artist.name} • Page 1/${chunks.length}` })
-                .setThumbnail(searchResults[0].albumArt || track.info.image || null);
+                .setFooter({ text: `Par ${lyricsArtist} • Source: ${source} • Page 1/${chunks.length}` })
+                .setThumbnail(track.info.artworkUrl || null);
 
             await message.reply({ embeds: [embed] });
 
-            // Send remaining chunks
             for (let i = 1; i < chunks.length; i++) {
                 const chunkEmbed = new EmbedBuilder()
                     .setDescription(chunks[i])
@@ -431,11 +925,11 @@ export async function lyricsCommand(message) {
             }
         } else {
             const embed = new EmbedBuilder()
-                .setTitle(`🎵 Paroles: ${searchResults[0].title}`)
+                .setTitle(`🎵 Paroles: ${lyricsTitle}`)
                 .setDescription(lyrics)
                 .setColor(0x1db954)
-                .setFooter({ text: `Par ${searchResults[0].artist.name}` })
-                .setThumbnail(searchResults[0].albumArt || track.info.image || null);
+                .setFooter({ text: `Par ${lyricsArtist} • Source: ${source}` })
+                .setThumbnail(track.info.artworkUrl || null);
 
             await message.reply({ embeds: [embed] });
         }
