@@ -372,6 +372,21 @@ client.on('interactionCreate', async (interaction) => {
             }).catch(() => {});
         }
     }
+    
+    // Handle Profile buttons (Collection, Achievements, Back)
+    if (interaction.customId.startsWith('profile_')) {
+        try {
+            await economyCommands.handleProfileButton(interaction);
+        } catch (error) {
+            console.error('Error handling Profile button interaction:', error);
+            if (!interaction.replied && !interaction.deferred) {
+                await interaction.reply({ 
+                    content: '❌ Une erreur est survenue.', 
+                    ephemeral: true 
+                }).catch(() => {});
+            }
+        }
+    }
 });
 
 // Store active profile pagination messages

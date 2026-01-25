@@ -15,7 +15,8 @@
     "poru-spotify": "^2.0.2",
     "genius-lyrics-api": "^3.2.1",
     "lyrics-finder": "^21.7.0",
-    "genius-lyrics": "^4.4.7"
+    "genius-lyrics": "^4.4.7",
+    "canvas": "^3.1.0"
   },
   "name": "djjanus",
   "version": "1.0.0",

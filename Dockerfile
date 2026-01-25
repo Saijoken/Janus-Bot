@@ -1,10 +1,15 @@
 # Use Node.js 24 (matching system version)
 FROM node:24-slim
 
-# Install ffmpeg and git (required for @discordjs/voice and some npm packages)
+# Install ffmpeg, git, and canvas dependencies
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     git \
+    libcairo2-dev \
+    libpango1.0-dev \
+    libjpeg-dev \
+    libgif-dev \
+    librsvg2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user for security with home directory

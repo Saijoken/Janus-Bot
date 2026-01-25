@@ -1,5 +1,18 @@
-import { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
+import { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder } from 'discord.js';
 import * as db from '../database.js';
+import { createCanvas, loadImage, registerFont } from 'canvas';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+// Register Pokemon font
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+try {
+    registerFont(join(__dirname, '../fonts/pokemon.ttf'), { family: 'Pokemon' });
+    console.log('✅ Police Pokemon chargée');
+} catch (e) {
+    console.warn('⚠️ Police Pokemon non trouvée, utilisation de la police par défaut');
+}
 
 // PokeAPI base URL
 const POKEAPI_BASE = 'https://pokeapi.co/api/v2';
@@ -820,7 +833,543 @@ export async function handleQTEInteraction(interaction) {
 }
 
 /**
- * Pokedex command - View caught Pokemon progress
+ * Helper to draw rounded rectangle
+ */
+function roundRect(ctx, x, y, width, height, radius) {
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + width - radius, y);
+    ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+    ctx.lineTo(x + width, y + height - radius);
+    ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+    ctx.lineTo(x + radius, y + height);
+    ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+}
+
+/**
+ * Draw a simple Pokeball icon
+ */
+function drawPokeball(ctx, x, y, size) {
+    const radius = size / 2;
+    const centerX = x + radius;
+    const centerY = y + radius;
+    
+    // Outer circle - red top
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius, Math.PI, 0);
+    ctx.fillStyle = '#ff1a1a';
+    ctx.fill();
+    ctx.closePath();
+    
+    // Outer circle - white bottom
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius, 0, Math.PI);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.closePath();
+    
+    // Middle line
+    ctx.fillStyle = '#333333';
+    ctx.fillRect(x, centerY - 1, size, 3);
+    
+    // Center circle
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius * 0.35, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.strokeStyle = '#333333';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.closePath();
+    
+    // Inner dot
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius * 0.15, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.closePath();
+}
+
+/**
+ * Type colors for Pokemon types
+ */
+const TYPE_COLORS = {
+    normal: '#A8A878', fire: '#F08030', water: '#6890F0', electric: '#F8D030',
+    grass: '#78C850', ice: '#98D8D8', fighting: '#C03028', poison: '#A040A0',
+    ground: '#E0C068', flying: '#A890F0', psychic: '#F85888', bug: '#A8B820',
+    rock: '#B8A038', ghost: '#705898', dragon: '#7038F8', dark: '#705848',
+    steel: '#B8B8D0', fairy: '#EE99AC'
+};
+
+/**
+ * French type names
+ */
+const TYPE_NAMES_FR = {
+    normal: 'Normal', fire: 'Feu', water: 'Eau', electric: 'Électrik',
+    grass: 'Plante', ice: 'Glace', fighting: 'Combat', poison: 'Poison',
+    ground: 'Sol', flying: 'Vol', psychic: 'Psy', bug: 'Insecte',
+    rock: 'Roche', ghost: 'Spectre', dragon: 'Dragon', dark: 'Ténèbres',
+    steel: 'Acier', fairy: 'Fée'
+};
+
+/**
+ * Generate Pokemon info card image (Modern Pokedex style)
+ * @param {boolean} isShiny - If true, display shiny version
+ * @param {object} userCaughtInfo - { caught: boolean, shinyCaught: boolean } or null
+ */
+async function generatePokemonInfoImage(pokemon, species, frenchName, description, rarity, isShiny = false, userCaughtInfo = null) {
+    const width = 480;
+    const height = 265;
+    
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    
+    // === MAIN BACKGROUND (Light blue gradient) ===
+    const bgGradient = ctx.createLinearGradient(0, 0, 0, height);
+    bgGradient.addColorStop(0, '#e8f4fc');
+    bgGradient.addColorStop(1, '#c9e4f6');
+    ctx.fillStyle = bgGradient;
+    ctx.fillRect(0, 0, width, height);
+    
+    // === LARGE POKEBALL BACKGROUND (Light red, decorative) ===
+    const pokeballSize = 160;
+    const pokeballCenterX = 90;
+    const pokeballCenterY = 120;
+    
+    // === POKEBALL BACKGROUND ===
+    const centerButtonRadius = 26;
+    
+    // Top half (light red) - using pre-mixed color instead of transparency
+    ctx.globalAlpha = 1.0;
+    ctx.beginPath();
+    ctx.arc(pokeballCenterX, pokeballCenterY, pokeballSize/2, Math.PI, 0);
+    ctx.fillStyle = '#f5c6c6'; // Light red pre-mixed with background
+    ctx.fill();
+    
+    // Bottom half (very light) 
+    ctx.beginPath();
+    ctx.arc(pokeballCenterX, pokeballCenterY, pokeballSize/2, 0, Math.PI);
+    ctx.fillStyle = '#e0eff7'; // Light white-blue pre-mixed with background
+    ctx.fill();
+    
+    // Center line (split in two parts) - solid color
+    ctx.fillStyle = '#a0c4d8';
+    // Left part of line
+    ctx.fillRect(pokeballCenterX - pokeballSize/2, pokeballCenterY - 3, pokeballSize/2 - centerButtonRadius, 6);
+    // Right part of line
+    ctx.fillRect(pokeballCenterX + centerButtonRadius, pokeballCenterY - 3, pokeballSize/2 - centerButtonRadius, 6);
+    
+    // Center button - outer ring (darker)
+    ctx.beginPath();
+    ctx.arc(pokeballCenterX, pokeballCenterY, 22, 0, Math.PI * 2);
+    ctx.fillStyle = '#a0c4d8';
+    ctx.fill();
+    
+    // Center button - inner (white matching background tone)
+    ctx.beginPath();
+    ctx.arc(pokeballCenterX, pokeballCenterY, 16, 0, Math.PI * 2);
+    ctx.fillStyle = '#e8f4fc';
+    ctx.fill();
+    
+    // === HEADER BAR ===
+    const headerHeight = 45;
+    ctx.fillStyle = '#3498db';
+    ctx.fillRect(0, 0, width, headerHeight);
+    
+    // Header gradient overlay
+    const headerGradient = ctx.createLinearGradient(0, 0, 0, headerHeight);
+    headerGradient.addColorStop(0, 'rgba(255,255,255,0.15)');
+    headerGradient.addColorStop(1, 'rgba(0,0,0,0.1)');
+    ctx.fillStyle = headerGradient;
+    ctx.fillRect(0, 0, width, headerHeight);
+    
+    // Pokemon number (large, left) - Using Pokemon font
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '22px "Pokemon", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(`#${pokemon.id.toString().padStart(3, '0')}`, 12, 30);
+    
+    // Pokemon name (center) - Using Pokemon font
+    ctx.font = '20px "Pokemon", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(frenchName, width / 2 + 40, 30);
+    
+    // Rarity indicator and caught status (right side)
+    if (userCaughtInfo?.caught) {
+        // Draw small Pokeball icon (top right)
+        const pbX = width - 22;
+        const pbY = 22;
+        const pbSize = 16;
+        
+        // Pokeball top (red)
+        ctx.beginPath();
+        ctx.arc(pbX, pbY, pbSize/2, Math.PI, 0);
+        ctx.fillStyle = '#ff4444';
+        ctx.fill();
+        
+        // Pokeball bottom (white)
+        ctx.beginPath();
+        ctx.arc(pbX, pbY, pbSize/2, 0, Math.PI);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        
+        // Pokeball line
+        ctx.fillStyle = '#333333';
+        ctx.fillRect(pbX - pbSize/2, pbY - 1, pbSize, 2);
+        
+        // Pokeball center
+        ctx.beginPath();
+        ctx.arc(pbX, pbY, 3, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.strokeStyle = '#333333';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        
+        // Rarity text with Pokemon font (left of Pokeball)
+        ctx.font = '14px "Pokemon", sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillStyle = rarity.color === 0xFFD700 ? '#ffd700' : '#ffffff';
+        ctx.fillText(rarity.name, pbX - 14, 27);
+        
+        // Shiny star if user caught shiny (on top right of Pokeball)
+        if (userCaughtInfo.shinyCaught) {
+            const starX = pbX + 6;
+            const starY = 12;
+            const starSize = 5;
+            
+            // Draw a 4-pointed star
+            ctx.fillStyle = '#ffd700';
+            ctx.beginPath();
+            ctx.moveTo(starX, starY - starSize);
+            ctx.lineTo(starX + starSize * 0.3, starY - starSize * 0.3);
+            ctx.lineTo(starX + starSize, starY);
+            ctx.lineTo(starX + starSize * 0.3, starY + starSize * 0.3);
+            ctx.lineTo(starX, starY + starSize);
+            ctx.lineTo(starX - starSize * 0.3, starY + starSize * 0.3);
+            ctx.lineTo(starX - starSize, starY);
+            ctx.lineTo(starX - starSize * 0.3, starY - starSize * 0.3);
+            ctx.closePath();
+            ctx.fill();
+        }
+    } else {
+        // Just show rarity without Pokeball
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillStyle = rarity.color === 0xFFD700 ? '#ffd700' : '#ffffff';
+        ctx.fillText(rarity.name, width - 12, 28);
+    }
+    
+    // === POKEMON SPRITE ===
+    try {
+        const spriteUrl = isShiny 
+            ? (pokemon.sprites.other?.['official-artwork']?.front_shiny || pokemon.sprites.front_shiny)
+            : (pokemon.sprites.other?.['official-artwork']?.front_default || pokemon.sprites.front_default);
+        if (spriteUrl) {
+            const sprite = await loadImage(spriteUrl);
+            const spriteSize = 135;
+            ctx.drawImage(sprite, 20, 52, spriteSize, spriteSize);
+        }
+    } catch (e) {
+        console.error('Error loading Pokemon sprite:', e);
+    }
+    
+    // Shiny indicator (draw star + text)
+    if (isShiny) {
+        const shinyX = 25;
+        const shinyY = 192;
+        
+        // Draw a golden star
+        ctx.fillStyle = '#ffd700';
+        ctx.beginPath();
+        const starSize = 6;
+        ctx.moveTo(shinyX, shinyY - starSize);
+        ctx.lineTo(shinyX + starSize * 0.3, shinyY - starSize * 0.3);
+        ctx.lineTo(shinyX + starSize, shinyY);
+        ctx.lineTo(shinyX + starSize * 0.3, shinyY + starSize * 0.3);
+        ctx.lineTo(shinyX, shinyY + starSize);
+        ctx.lineTo(shinyX - starSize * 0.3, shinyY + starSize * 0.3);
+        ctx.lineTo(shinyX - starSize, shinyY);
+        ctx.lineTo(shinyX - starSize * 0.3, shinyY - starSize * 0.3);
+        ctx.closePath();
+        ctx.fill();
+        
+        // Text
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('SHINY', shinyX + 12, shinyY + 4);
+    }
+    
+    // === INFO PANEL (Right side) ===
+    const panelX = 170;
+    const panelY = 50;
+    const panelWidth = 298;
+    const panelHeight = 140;
+    
+    // Panel background
+    roundRect(ctx, panelX, panelY, panelWidth, panelHeight, 10);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.fill();
+    ctx.strokeStyle = '#3498db';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    
+    // Species/Category
+    const genus = species?.genera?.find(g => g.language.name === 'fr')?.genus 
+        || species?.genera?.find(g => g.language.name === 'en')?.genus 
+        || 'Pokemon';
+    ctx.fillStyle = '#666666';
+    ctx.font = 'italic 12px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(genus, panelX + 10, panelY + 16);
+    
+    // Type badges
+    let typeX = panelX + 10;
+    ctx.font = 'bold 10px sans-serif';
+    for (const t of pokemon.types) {
+        const typeName = t.type.name;
+        const typeColor = TYPE_COLORS[typeName] || '#888888';
+        const typeFr = TYPE_NAMES_FR[typeName] || typeName;
+        
+        const badgeWidth = ctx.measureText(typeFr.toUpperCase()).width + 16;
+        roundRect(ctx, typeX, panelY + 22, badgeWidth, 18, 9);
+        ctx.fillStyle = typeColor;
+        ctx.fill();
+        
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(typeFr.toUpperCase(), typeX + 8, panelY + 35);
+        
+        typeX += badgeWidth + 6;
+    }
+    
+    // Height & Weight row (text only, no emoji)
+    ctx.fillStyle = '#444444';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Taille: ${(pokemon.height / 10).toFixed(1)} m`, panelX + 10, panelY + 56);
+    ctx.fillText(`Poids: ${(pokemon.weight / 10).toFixed(1)} kg`, panelX + 100, panelY + 56);
+    
+    // === STATS SECTION ===
+    const totalStats = pokemon.stats.reduce((sum, s) => sum + s.base_stat, 0);
+    
+    ctx.fillStyle = '#333333';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.fillText(`STATS (Total: ${totalStats})`, panelX + 10, panelY + 72);
+    
+    // Stat bars (compact 2x3 grid)
+    const statNames = ['PV', 'ATQ', 'DEF', 'ATS', 'DFS', 'VIT'];
+    const statColors = ['#ef5350', '#ff7043', '#ffca28', '#42a5f5', '#66bb6a', '#ec407a'];
+    const statsStartY = panelY + 80;
+    const colWidth = 145;
+    const barWidth = 80;
+    const barHeight = 7;
+    
+    for (let i = 0; i < 6; i++) {
+        const stat = pokemon.stats[i];
+        const col = i % 2;
+        const row = Math.floor(i / 2);
+        const x = panelX + 10 + col * colWidth;
+        const y = statsStartY + row * 18;
+        const fillWidth = Math.min(barWidth, (stat.base_stat / 160) * barWidth);
+        
+        // Stat name
+        ctx.fillStyle = '#555555';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(statNames[i], x, y + 6);
+        
+        // Bar background
+        roundRect(ctx, x + 25, y, barWidth, barHeight, 3);
+        ctx.fillStyle = '#e0e0e0';
+        ctx.fill();
+        
+        // Bar fill
+        if (fillWidth > 0) {
+            roundRect(ctx, x + 25, y, fillWidth, barHeight, 3);
+            ctx.fillStyle = statColors[i];
+            ctx.fill();
+        }
+        
+        // Value
+        ctx.fillStyle = '#333333';
+        ctx.font = 'bold 9px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(stat.base_stat.toString(), x + barWidth + 30, y + 6);
+    }
+    
+    // === DESCRIPTION SECTION (Bottom) ===
+    const descY = 195;
+    const descHeight = height - descY - 5;
+    
+    roundRect(ctx, 8, descY, width - 16, descHeight, 8);
+    ctx.fillStyle = 'rgba(44, 62, 80, 0.92)';
+    ctx.fill();
+    
+    // Description text (wrapped)
+    ctx.fillStyle = '#ecf0f1';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'left';
+    
+    const descText = description || 'Aucune description disponible.';
+    const maxWidth = width - 36;
+    const words = descText.split(' ');
+    let line = '';
+    let lineY = descY + 16;
+    const lineHeight = 14;
+    const maxLines = 4;
+    let lineCount = 0;
+    
+    for (const word of words) {
+        const testLine = line + word + ' ';
+        const metrics = ctx.measureText(testLine);
+        if (metrics.width > maxWidth && line !== '') {
+            ctx.fillText(line.trim(), 14, lineY);
+            line = word + ' ';
+            lineY += lineHeight;
+            lineCount++;
+            if (lineCount >= maxLines) break;
+        } else {
+            line = testLine;
+        }
+    }
+    if (line && lineCount < maxLines) {
+        ctx.fillText(line.trim(), 14, lineY);
+    }
+    
+    // === OUTER BORDER ===
+    roundRect(ctx, 2, 2, width - 4, height - 4, 6);
+    ctx.strokeStyle = '#2980b9';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    
+    return canvas.toBuffer('image/png');
+}
+
+/**
+ * Generate a grid-based Pokedex image with slots for each Pokemon
+ * Shows sprites for caught Pokemon (shiny priority), empty slots for uncaught
+ */
+async function generatePokedexGridImage(startId, endId, caughtMap) {
+    const cols = 5;
+    const cellSize = 65;
+    const spriteSize = 48;
+    const cellPadding = 3;
+    const padding = 8;
+    const cornerRadius = 8;
+    
+    const totalPokemon = endId - startId + 1;
+    const rows = Math.ceil(totalPokemon / cols);
+    
+    const width = cols * cellSize + padding * 2;
+    const height = rows * cellSize + padding * 2;
+    
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    
+    // Light blue background (like the reference image)
+    ctx.fillStyle = '#5bc0de';
+    ctx.fillRect(0, 0, width, height);
+    
+    // Fetch all Pokemon data for this range
+    const pokemonIds = [];
+    for (let id = startId; id <= endId; id++) {
+        pokemonIds.push(id);
+    }
+    
+    // Load sprites for caught Pokemon only (optimization)
+    const spritePromises = pokemonIds.map(async (id) => {
+        const caught = caughtMap.get(id);
+        if (!caught) return { id, sprite: null, caught: false };
+        
+        try {
+            const pokemon = await fetchPokemon(id);
+            if (!pokemon) return { id, sprite: null, caught: true };
+            
+            // Shiny takes priority
+            const spriteUrl = caught.shiny_caught 
+                ? (pokemon.sprites.front_shiny || pokemon.sprites.front_default)
+                : pokemon.sprites.front_default;
+            
+            if (!spriteUrl) return { id, sprite: null, caught: true, isShiny: caught.shiny_caught };
+            
+            const sprite = await loadImage(spriteUrl);
+            return { id, sprite, caught: true, isShiny: caught.shiny_caught };
+        } catch {
+            return { id, sprite: null, caught: true };
+        }
+    });
+    
+    const spriteData = await Promise.all(spritePromises);
+    const spriteMap = new Map(spriteData.map(s => [s.id, s]));
+    
+    // Draw grid cells
+    for (let i = 0; i < totalPokemon; i++) {
+        const pokemonId = startId + i;
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const x = padding + col * cellSize + cellPadding;
+        const y = padding + row * cellSize + cellPadding;
+        const innerSize = cellSize - cellPadding * 2;
+        
+        const data = spriteMap.get(pokemonId);
+        const isCaught = data?.caught;
+        const isShiny = data?.isShiny;
+        
+        // Cell border (darker blue)
+        roundRect(ctx, x, y, innerSize, innerSize, cornerRadius);
+        ctx.fillStyle = '#3a9fc9';
+        ctx.fill();
+        
+        // Cell inner background
+        roundRect(ctx, x + 2, y + 2, innerSize - 4, innerSize - 4, cornerRadius - 2);
+        if (isCaught) {
+            // Caught - lighter blue/cyan
+            ctx.fillStyle = isShiny ? '#fff8dc' : '#7dd3e8';
+        } else {
+            // Not caught - slightly darker/faded
+            ctx.fillStyle = '#4aa8cc';
+        }
+        ctx.fill();
+        
+        // Shiny sparkle border
+        if (isShiny) {
+            roundRect(ctx, x + 1, y + 1, innerSize - 2, innerSize - 2, cornerRadius - 1);
+            ctx.strokeStyle = '#ffd700';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+        
+        // Draw Pokemon number (top right corner)
+        ctx.fillStyle = isCaught ? '#2980b9' : '#357a9e';
+        ctx.font = 'bold 11px Arial';
+        ctx.textAlign = 'right';
+        ctx.fillText(pokemonId.toString(), x + innerSize - 5, y + 14);
+        
+        // Draw sprite or silhouette placeholder
+        if (data?.sprite) {
+            const offsetX = (innerSize - spriteSize) / 2;
+            const offsetY = (innerSize - spriteSize) / 2 + 2;
+            ctx.drawImage(data.sprite, x + offsetX, y + offsetY, spriteSize, spriteSize);
+            
+            // Draw Pokeball icon (bottom left corner) for caught Pokemon
+            drawPokeball(ctx, x + 4, y + innerSize - 16, 12);
+        } else {
+            // Show just the number larger in center for uncaught
+            ctx.fillStyle = '#357a9e';
+            ctx.font = 'bold 18px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText(pokemonId.toString(), x + innerSize / 2, y + innerSize / 2 + 6);
+        }
+    }
+    
+    return canvas.toBuffer('image/png');
+}
+
+/**
+ * Pokedex command - View caught Pokemon progress in grid format
  */
 export async function pokedexCommand(message, args) {
     const userId = message.author.id;
@@ -829,52 +1378,68 @@ export async function pokedexCommand(message, args) {
     const pokedex = await db.getPokedex(userId, guildId);
     const counts = await db.getPokemonCounts(userId, guildId);
     
-    if (pokedex.length === 0) {
-        const embed = new EmbedBuilder()
-            .setTitle('📕 Pokédex')
-            .setDescription('Ton Pokédex est vide ! Utilise `$catch` pour capturer des Pokémon.')
-            .setColor(0xff0000);
-        return message.reply({ embeds: [embed] });
+    // Create a map of caught Pokemon for quick lookup
+    const caughtMap = new Map();
+    for (const entry of pokedex) {
+        caughtMap.set(entry.pokemon_id, entry);
     }
     
-    // Pagination
-    const page = parseInt(args[0]) || 1;
-    const perPage = 15;
-    const totalPages = Math.ceil(pokedex.length / perPage);
-    const startIndex = (page - 1) * perPage;
-    const pageEntries = pokedex.slice(startIndex, startIndex + perPage);
+    // Pagination by Pokemon ID ranges (35 per page = 5x7 grid)
+    const perPage = 35;
+    const totalPages = Math.ceil(MAX_POKEMON_ID / perPage);
+    const page = Math.max(1, Math.min(parseInt(args[0]) || 1, totalPages));
+    
+    const startId = (page - 1) * perPage + 1;
+    const endId = Math.min(page * perPage, MAX_POKEMON_ID);
+    
+    // Count caught in this range
+    let caughtInRange = 0;
+    let shinyInRange = 0;
+    for (let id = startId; id <= endId; id++) {
+        const entry = caughtMap.get(id);
+        if (entry) {
+            caughtInRange++;
+            if (entry.shiny_caught) shinyInRange++;
+        }
+    }
     
     // Show loading message
     const loadingEmbed = new EmbedBuilder()
-        .setDescription('🔍 Chargement du Pokédex...')
+        .setDescription('🔍 Génération du Pokédex...')
         .setColor(0x3498db);
     const loadingMsg = await message.reply({ embeds: [loadingEmbed] });
     
-    // Fetch French names for all Pokemon on this page
-    const speciesData = await Promise.all(
-        pageEntries.map(entry => fetchSpecies(entry.pokemon_id))
-    );
-    
-    const entryList = pageEntries.map((entry, index) => {
-        const shinyMark = entry.shiny_caught ? ' ✨' : '';
-        const frenchName = getFrenchName(speciesData[index], entry.pokemon_name);
-        return `#${entry.pokemon_id.toString().padStart(3, '0')} ${frenchName}${shinyMark} (x${entry.caught_count})`;
-    }).join('\n');
-    
-    const completionPercent = ((counts.unique / MAX_POKEMON_ID) * 100).toFixed(1);
-    
-    const embed = new EmbedBuilder()
-        .setTitle(`📕 Pokédex de ${message.author.username}`)
-        .setDescription(`\`\`\`\n${entryList}\n\`\`\``)
-        .setColor(0xE74C3C)
-        .addFields(
-            { name: '📊 Progression', value: `${counts.unique}/${MAX_POKEMON_ID} (${completionPercent}%)`, inline: true },
-            { name: '🎯 Total capturés', value: `${counts.total}`, inline: true },
-            { name: '✨ Shinies', value: `${counts.shiny}`, inline: true }
-        )
-        .setFooter({ text: `Page ${page}/${totalPages} • Utilise $pokedex <page> pour naviguer` });
-    
-    await loadingMsg.edit({ embeds: [embed] });
+    try {
+        // Generate the grid image
+        const imageBuffer = await generatePokedexGridImage(startId, endId, caughtMap);
+        const attachment = new AttachmentBuilder(imageBuffer, { name: 'pokedex.png' });
+        
+        const completionPercent = ((counts.unique / MAX_POKEMON_ID) * 100).toFixed(1);
+        
+        const embed = new EmbedBuilder()
+            .setTitle(`📕 Pokédex de ${message.author.username}`)
+            .setDescription(`**#${startId.toString().padStart(3, '0')}** à **#${endId.toString().padStart(3, '0')}** — ${caughtInRange}/${endId - startId + 1} capturés${shinyInRange > 0 ? ` (${shinyInRange} ✨)` : ''}`)
+            .setColor(0xE74C3C)
+            .setImage('attachment://pokedex.png')
+            .addFields(
+                { name: '📊 Total', value: `${counts.unique}/${MAX_POKEMON_ID} (${completionPercent}%)`, inline: true },
+                { name: '🎯 Attrapés', value: `${counts.total}`, inline: true },
+                { name: '✨ Shinies', value: `${counts.shiny}`, inline: true }
+            )
+            .setFooter({ text: `Page ${page}/${totalPages} • $pokedex <page> pour naviguer` });
+        
+        await loadingMsg.edit({ embeds: [embed], files: [attachment] });
+    } catch (error) {
+        console.error('Error generating pokedex image:', error);
+        
+        // Fallback to text
+        const embed = new EmbedBuilder()
+            .setTitle(`📕 Pokédex de ${message.author.username}`)
+            .setDescription(`Erreur lors de la génération de l'image.\n\n**Progression:** ${counts.unique}/${MAX_POKEMON_ID} Pokémon capturés`)
+            .setColor(0xE74C3C);
+        
+        await loadingMsg.edit({ embeds: [embed] });
+    }
 }
 
 /**
@@ -907,54 +1472,83 @@ export async function pokemonInfoCommand(message, args) {
     const frenchName = getFrenchName(species, pokemon.name);
     const rarity = getRarity(pokemon.id, species);
     
-    // Stats with compact 5-segment bars (aligned)
-    const stats = pokemon.stats.map(s => {
-        const statNames = {
-            'hp': 'PV ', 'attack': 'ATK', 'defense': 'DEF',
-            'special-attack': 'SPA', 'special-defense': 'SPD', 'speed': 'VIT'
-        };
-        const name = statNames[s.stat.name] || s.stat.name;
-        const value = s.base_stat;
-        const filled = Math.min(5, Math.round(value / 40)); // 0-5 scale
+    // Check if user has caught this Pokemon
+    const userId = message.author.id;
+    const guildId = message.guild.id;
+    const pokedex = await db.getPokedex(userId, guildId);
+    const caughtEntry = pokedex.find(p => p.pokemon_id === pokemon.id);
+    const userCaughtInfo = caughtEntry ? { caught: true, shinyCaught: caughtEntry.shiny_caught } : null;
+    
+    try {
+        // Generate the Pokemon info card image
+        const imageBuffer = await generatePokemonInfoImage(pokemon, species, frenchName, description, rarity, false, userCaughtInfo);
+        const attachment = new AttachmentBuilder(imageBuffer, { name: 'pokemon-info.png' });
         
-        // Color based on stat value
-        let color;
-        if (value >= 100) color = '🟩';
-        else if (value >= 70) color = '🟨';
-        else if (value >= 40) color = '🟧';
-        else color = '🟥';
+        const generation = species?.generation?.name?.split('-')[1]?.toUpperCase() || '?';
         
-        const bar = color.repeat(filled) + '⬜'.repeat(5 - filled);
-        return `\`${name}\` ${bar} \`${value.toString().padStart(3)}\``;
-    }).join('\n');
-    
-    const totalStats = pokemon.stats.reduce((sum, s) => sum + s.base_stat, 0);
-    
-    const embed = new EmbedBuilder()
-        .setTitle(`#${pokemon.id} ${frenchName} ${rarity.emoji}`)
-        .setDescription(description || '*Aucune description disponible*')
-        .setThumbnail(pokemon.sprites.front_default)
-        .setImage(pokemon.sprites.other['official-artwork']?.front_default || pokemon.sprites.front_default)
-        .setColor(rarity.color)
-        .addFields(
-            { name: '🏷️ Type', value: formatTypes(pokemon.types), inline: true },
-            { name: '📏 Taille', value: `${pokemon.height / 10}m`, inline: true },
-            { name: '⚖️ Poids', value: `${pokemon.weight / 10}kg`, inline: true },
-            { name: '⭐ Rareté', value: rarity.name, inline: true },
-            { name: `📊 Stats (Total: ${totalStats})`, value: stats, inline: false }
-        )
-        .setFooter({ text: `Génération ${species?.generation?.name?.split('-')[1]?.toUpperCase() || '?'} • Utilise $catch pour capturer des Pokémon !` });
-    
-    // Add shiny button
-    const row = new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId(`pokemon_shiny_${pokemon.id}`)
-                .setLabel('✨ Voir Shiny')
-                .setStyle(ButtonStyle.Secondary)
-        );
-    
-    await loadingMsg.edit({ embeds: [embed], components: [row] });
+        const embed = new EmbedBuilder()
+            .setColor(rarity.color)
+            .setImage('attachment://pokemon-info.png')
+            .setFooter({ text: `Génération ${generation} • Utilise $catch pour capturer des Pokémon !` });
+        
+        // Add shiny button
+        const row = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`pokemon_shiny_${pokemon.id}`)
+                    .setLabel('✨ Voir Shiny')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+        
+        await loadingMsg.edit({ embeds: [embed], files: [attachment], components: [row] });
+    } catch (error) {
+        console.error('Error generating Pokemon info image:', error);
+        
+        // Fallback to embed-based display
+        const stats = pokemon.stats.map(s => {
+            const statNames = {
+                'hp': 'PV ', 'attack': 'ATK', 'defense': 'DEF',
+                'special-attack': 'SPA', 'special-defense': 'SPD', 'speed': 'VIT'
+            };
+            const name = statNames[s.stat.name] || s.stat.name;
+            const value = s.base_stat;
+            const filled = Math.min(5, Math.round(value / 40));
+            let color;
+            if (value >= 100) color = '🟩';
+            else if (value >= 70) color = '🟨';
+            else if (value >= 40) color = '🟧';
+            else color = '🟥';
+            const bar = color.repeat(filled) + '⬜'.repeat(5 - filled);
+            return `\`${name}\` ${bar} \`${value.toString().padStart(3)}\``;
+        }).join('\n');
+        
+        const totalStats = pokemon.stats.reduce((sum, s) => sum + s.base_stat, 0);
+        
+        const embed = new EmbedBuilder()
+            .setTitle(`#${pokemon.id} ${frenchName} ${rarity.emoji}`)
+            .setDescription(description || '*Aucune description disponible*')
+            .setThumbnail(pokemon.sprites.front_default)
+            .setImage(pokemon.sprites.other['official-artwork']?.front_default || pokemon.sprites.front_default)
+            .setColor(rarity.color)
+            .addFields(
+                { name: '🏷️ Type', value: formatTypes(pokemon.types), inline: true },
+                { name: '📏 Taille', value: `${pokemon.height / 10}m`, inline: true },
+                { name: '⚖️ Poids', value: `${pokemon.weight / 10}kg`, inline: true },
+                { name: '⭐ Rareté', value: rarity.name, inline: true },
+                { name: `📊 Stats (Total: ${totalStats})`, value: stats, inline: false }
+            )
+            .setFooter({ text: `Génération ${species?.generation?.name?.split('-')[1]?.toUpperCase() || '?'} • Utilise $catch pour capturer des Pokémon !` });
+        
+        const row = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`pokemon_shiny_${pokemon.id}`)
+                    .setLabel('✨ Voir Shiny')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+        
+        await loadingMsg.edit({ embeds: [embed], components: [row] });
+    }
 }
 
 /**
@@ -1018,24 +1612,45 @@ export async function pcCommand(message, args) {
 export async function handlePokemonInteraction(interaction) {
     if (!interaction.customId.startsWith('pokemon_shiny_')) return false;
     
+    await interaction.deferReply({ ephemeral: true });
+    
     const pokemonId = interaction.customId.split('_')[2];
     const pokemon = await fetchPokemon(pokemonId);
     
     if (!pokemon) {
-        await interaction.reply({ content: '❌ Erreur lors du chargement du shiny.', ephemeral: true });
+        await interaction.editReply({ content: '❌ Erreur lors du chargement du shiny.' });
         return true;
     }
     
     const species = await fetchSpecies(pokemonId);
     const frenchName = getFrenchName(species, pokemon.name);
-    const shinySprite = pokemon.sprites.other['official-artwork']?.front_shiny || pokemon.sprites.front_shiny;
+    const description = getFrenchDescription(species);
+    const rarity = getRarity(pokemon.id, species);
     
-    const embed = new EmbedBuilder()
-        .setTitle(`✨ ${frenchName} Shiny`)
-        .setImage(shinySprite || pokemon.sprites.front_shiny)
-        .setColor(0xFFD700)
-        .setFooter({ text: 'Chance d\'obtenir un shiny: 1/100' });
+    try {
+        // Generate shiny card image
+        const imageBuffer = await generatePokemonInfoImage(pokemon, species, frenchName, description, rarity, true);
+        const attachment = new AttachmentBuilder(imageBuffer, { name: 'pokemon-shiny.png' });
+        
+        const embed = new EmbedBuilder()
+            .setColor(0xFFD700)
+            .setImage('attachment://pokemon-shiny.png')
+            .setFooter({ text: 'Chance d\'obtenir un shiny: 1/100' });
+        
+        await interaction.editReply({ embeds: [embed], files: [attachment] });
+    } catch (error) {
+        console.error('Error generating shiny card:', error);
+        
+        // Fallback to simple embed
+        const shinySprite = pokemon.sprites.other?.['official-artwork']?.front_shiny || pokemon.sprites.front_shiny;
+        const embed = new EmbedBuilder()
+            .setTitle(`✨ ${frenchName} Shiny`)
+            .setImage(shinySprite)
+            .setColor(0xFFD700)
+            .setFooter({ text: 'Chance d\'obtenir un shiny: 1/100' });
+        
+        await interaction.editReply({ embeds: [embed] });
+    }
     
-    await interaction.reply({ embeds: [embed], ephemeral: true });
     return true;
 }
