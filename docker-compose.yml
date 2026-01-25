@@ -20,8 +20,8 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-discordbot_user} -d ${DB_NAME:-discordbot}"]
       interval: 1s
       timeout: 1s
-      retries: 15
-      start_period: 3s
+      retries: 30
+      start_period: 1s
     # Optimisations supplémentaires pour démarrage rapide
     command: >
       postgres
@@ -70,10 +70,17 @@ services:
       yt-cipher:
         condition: service_started
     environment:
-      # Set Java options (512MB heap size)
-      - _JAVA_OPTIONS=-Xmx512M
+      # Java options optimized for FASTEST startup
+      # -XX:TieredStopAtLevel=1: Only use C1 compiler (fastest startup, less optimization)
+      # -XX:+UseParallelGC: Faster startup than G1GC
+      # -XX:CICompilerCount=2: Use 2 compiler threads
+      # -Xverify:none: Skip bytecode verification (faster but less safe)
+      # -XX:-UsePerfData: Disable perf data collection
+      - _JAVA_OPTIONS=-Xmx512M -Xms256M -XX:TieredStopAtLevel=1 -XX:+UseParallelGC -XX:CICompilerCount=2 -Xverify:none -XX:-UsePerfData
       # Set password for lavalink (can also be set in application.yml)
       - LAVALINK_SERVER_PASSWORD=youshallnotpass
+      # Genius Access Token for lyrics
+      - GENIUS_ACCESS_TOKEN=${GENIUS_ACCESS_TOKEN:-}
     volumes:
       # Mount application.yml from the same directory
       - ./lavalink/application.yml:/opt/Lavalink/application.yml
@@ -81,12 +88,41 @@ services:
       - ./lavalink/plugins/:/opt/Lavalink/plugins/
     networks:
       - discordbot-network
+    # Healthcheck to know when Lavalink is ready (requires authorization header)
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null --header='Authorization: youshallnotpass' http://localhost:2333/version || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
     expose:
       # Expose port 2333 to other containers in the network
       - 2333
     ports:
       # Expose to host (only needed if accessing from outside containers)
       - "2333:2333"
+
+  # Lyrics scraper - Puppeteer-based Genius scraper to bypass Cloudflare
+  lyrics-scraper:
+    build:
+      context: ./lyrics-scraper
+      dockerfile: Dockerfile
+    container_name: lyrics-scraper
+    restart: unless-stopped
+    stop_grace_period: 10s
+    networks:
+      - discordbot-network
+    environment:
+      - PORT=3500
+      - API_TOKEN=${LYRICS_SCRAPER_TOKEN:-lyrics-secret}
+      - GENIUS_ACCESS_TOKEN=${GENIUS_ACCESS_TOKEN:-}
+    expose:
+      - 3500
+    # Resource limits (Puppeteer can be memory-hungry)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
   discordbot:
     build:
@@ -99,8 +135,8 @@ services:
       postgres:
         condition: service_healthy
       lavalink:
-        condition: service_started
-    # Le bot attendra que PostgreSQL soit prêt grâce au healthcheck optimisé
+        condition: service_healthy
+    # Le bot attendra que PostgreSQL et Lavalink soient prêts grâce aux healthchecks
     networks:
       - discordbot-network
     environment:
@@ -115,9 +151,13 @@ services:
       - LAVALINK_HOST=lavalink
       - LAVALINK_PORT=2333
       - LAVALINK_PASSWORD=youshallnotpass
-      - GENIUS_API_KEY=${GENIUS_API_KEY:-}
+      - GENIUS_ACCESS_TOKEN=${GENIUS_ACCESS_TOKEN:-}
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
+      # Lyrics scraper service
+      - LYRICS_SCRAPER_HOST=lyrics-scraper
+      - LYRICS_SCRAPER_PORT=3500
+      - LYRICS_SCRAPER_TOKEN=${LYRICS_SCRAPER_TOKEN:-lyrics-secret}
       - MUSIC_DEFAULT_PLATFORM=${MUSIC_DEFAULT_PLATFORM:-scsearch}
     volumes:
       # Persist the economy.json database

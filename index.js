@@ -1,5 +1,8 @@
-import dotenv from 'dotenv';
-dotenv.config();
+// Only load dotenv in development (Docker sets env vars directly)
+if (process.env.NODE_ENV !== 'production') {
+    const dotenv = await import('dotenv');
+    dotenv.config();
+}
 
 // Import opusscript for Opus encoding/decoding support in voice channels
 // This must be imported before @discordjs/voice is used
@@ -18,6 +21,7 @@ import * as soundboardCommands from './commands/soundboard.js';
 import * as gamesCommands from './commands/games.js';
 import * as fishingCommands from './commands/fishing.js';
 import * as casinoCommands from './commands/casino.js';
+import * as pokemonCommands from './commands/pokemon.js';
 import * as musicCommands from './commands/music.js';
 import { checkAutoDisconnect as checkMusicAutoDisconnect } from './commands/music.js';
 import { Poru } from 'poru';
@@ -146,7 +150,7 @@ client.on('messageCreate', async (message) => {
                 break;
             case 'help':
             case 'h':
-                await economyCommands.helpCommand(message);
+                await economyCommands.helpCommand(message, args);
                 break;
             case 'faaahhh':
             case 'fah':
@@ -178,14 +182,56 @@ client.on('messageCreate', async (message) => {
             case 'ach':
                 await fishingCommands.achievementsCommand(message);
                 break;
+            // === MARIO PARTY CASINO ===
             case 'casino':
+                await casinoCommands.casinoCommand(message, args);
+                break;
             case 'slot':
             case 'slots':
-                await casinoCommands.casinoCommand(message, args);
+                await casinoCommands.slotsCommand(message, args);
+                break;
+            case 'wheel':
+            case 'roue':
+                await casinoCommands.wheelCommand(message, args);
+                break;
+            case 'coinflip':
+            case 'flip':
+            case 'cf':
+                await casinoCommands.coinflipCommand(message, args);
+                break;
+            case 'duel':
+            case 'defi':
+                await casinoCommands.duelCommand(message, args);
+                break;
+            case 'bowser':
+                await casinoCommands.bowserCommand(message, args);
                 break;
             case 'allin':
             case 'all-in':
                 await casinoCommands.allinCommand(message);
+                break;
+            // Pokemon commands
+            case 'catch':
+            case 'attraper':
+                await pokemonCommands.catchCommand(message);
+                break;
+            case 'testlegendary':
+            case 'testleg':
+                await pokemonCommands.testLegendaryCommand(message);
+                break;
+            case 'pokedex':
+            case 'dex':
+                await pokemonCommands.pokedexCommand(message, args);
+                break;
+            case 'pokemon':
+            case 'poke':
+            case 'pk':
+                await pokemonCommands.pokemonInfoCommand(message, args);
+                break;
+            case 'pc':
+            case 'box':
+            case 'boite':
+                await pokemonCommands.pcCommand(message, args);
                 break;
             case 'say':
                 await gamesCommands.sayCommand(message, args);
@@ -212,6 +258,10 @@ client.on('messageCreate', async (message) => {
             case 'q':
                 await musicCommands.queueCommand(message);
                 break;
+            case 'shuffle':
+            case 'mix':
+                await musicCommands.shuffleCommand(message);
+                break;
             case 'nowplaying':
             case 'np':
             case 'current':
@@ -221,6 +271,11 @@ client.on('messageCreate', async (message) => {
             case 'disconnect':
             case 'dc':
                 await musicCommands.leaveCommand(message);
+                break;
+            case 'tts':
+            case 'speak':
+            case 'say-voice':
+                await musicCommands.ttsCommand(message, args);
                 break;
             case 'lyrics':
             case 'ly':
@@ -289,6 +344,32 @@ client.on('interactionCreate', async (interaction) => {
                     ephemeral: true 
                 }).catch(() => {});
             }
+        }
+    }
+    
+    // Handle Pokemon shiny button
+    if (interaction.customId.startsWith('pokemon_')) {
+        try {
+            await pokemonCommands.handlePokemonInteraction(interaction);
+        } catch (error) {
+            console.error('Error handling Pokemon interaction:', error);
+            await interaction.reply({ 
+                content: '❌ Une erreur est survenue.', 
+                ephemeral: true 
+            }).catch(() => {});
+        }
+    }
+    
+    // Handle Pokemon QTE catch button
+    if (interaction.customId.startsWith('qte_')) {
+        try {
+            await pokemonCommands.handleQTEInteraction(interaction);
+        } catch (error) {
+            console.error('Error handling QTE interaction:', error);
+            await interaction.reply({ 
+                content: '❌ Une erreur est survenue.', 
+                ephemeral: true 
+            }).catch(() => {});
         }
     }
 });
@@ -601,11 +682,8 @@ client.once('clientReady', async () => {
         console.error(`❌ Lavalink node error (${node.name}): ${error.message}`);
     });
     
-    // Wait a bit for Lavalink to be ready before initializing Poru
-    console.log('⏳ Attente que Lavalink soit prêt...');
-    await new Promise(resolve => setTimeout(resolve, 8000)); // Wait 8 seconds for Lavalink to fully start
-    
-    // Initialize Poru (must be called after client is ready, following AeroX pattern)
+    // Initialize Poru immediately (Lavalink should be ready thanks to Docker healthcheck)
+    console.log('⏳ Initialisation de Poru...');
     poruClient.init(client.user.id);
     console.log('✅ Poru client initialisé');
     
@@ -775,38 +853,49 @@ client.once('clientReady', async () => {
     // Set player instance in music commands (now that client is ready)
     musicCommands.setPlayer(poruClient);
     
-    // Set Genius API key if available
-    const geniusApiKey = process.env.GENIUS_API_KEY || '';
-    if (geniusApiKey) {
-        musicCommands.setGeniusApiKey(geniusApiKey);
+    // Set Genius Access Token if available
+    const geniusAccessToken = process.env.GENIUS_ACCESS_TOKEN || '';
+    if (geniusAccessToken) {
+        musicCommands.setGeniusApiKey(geniusAccessToken);
         console.log('✅ API Genius configurée');
     }
     
-    // Wait for node connection (following AeroX pattern)
+    // Wait for node connection with active polling (much faster than fixed waits)
     console.log('⏳ Attente de la connexion au node Lavalink...');
     
-    // Wait a bit for connection
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    const maxWaitTime = 15000; // 15 seconds max
+    const pollInterval = 250; // Check every 250ms
+    let elapsed = 0;
+    let connected = false;
     
-    // Check node connection status
-    const poruNodes = poruClient.nodes;
-    if (poruNodes && poruNodes.size > 0) {
-        const connectedNodes = Array.from(poruNodes.values()).filter(node => node.isConnected);
-        if (connectedNodes.length > 0) {
-            console.log(`✅ ${connectedNodes.length} node(s) Lavalink connecté(s) !`);
-        } else {
-            const allNodes = Array.from(poruNodes.values());
-            console.warn(`⚠️ ${allNodes.length} node(s) configuré(s) mais aucun connecté. États:`, 
-                allNodes.map(n => `${n.name}: ${n.isConnected ? 'connected' : 'disconnected'}`).join(', '));
+    while (elapsed < maxWaitTime && !connected) {
+        const poruNodes = poruClient.nodes;
+        if (poruNodes && poruNodes.size > 0) {
+            const connectedNodes = Array.from(poruNodes.values()).filter(node => node.isConnected);
+            if (connectedNodes.length > 0) {
+                connected = true;
+                console.log(`✅ ${connectedNodes.length} node(s) Lavalink connecté(s) ! (${elapsed}ms)`);
+                break;
+            }
         }
-    } else {
-        console.warn('⚠️ Aucun node Lavalink configuré.');
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+        elapsed += pollInterval;
+    }
+    
+    if (!connected) {
+        const poruNodes = poruClient.nodes;
+        if (poruNodes && poruNodes.size > 0) {
+            const allNodes = Array.from(poruNodes.values());
+            console.warn(`⚠️ ${allNodes.length} node(s) configuré(s) mais aucun connecté après ${maxWaitTime}ms. États:`, 
+                allNodes.map(n => `${n.name}: ${n.isConnected ? 'connected' : 'disconnected'}`).join(', '));
+        } else {
+            console.warn('⚠️ Aucun node Lavalink configuré.');
+        }
     }
     
     // Migrate fish from inventory to collection (one-time migration on startup)
-    // Wait a bit for PostgreSQL to be fully ready
+    // PostgreSQL is already ready thanks to Docker healthcheck
     try {
-        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds for PostgreSQL
         console.log('🔄 Migration des poissons de l\'inventaire vers la collection...');
         const migrationResult = await migrateInventoryToCollection();
         if (migrationResult.usersAffected > 0) {

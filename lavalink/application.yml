@@ -45,18 +45,13 @@ lavalink:
     # LavaSrc - Spotify, Deezer, Apple Music, etc - https://github.com/topi314/LavaSrc
     - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.1"
       repository: "https://maven.lavalink.dev/releases"
-    # LavaSearch - Better search - https://github.com/topi314/LavaSearch
-    - dependency: "com.github.topi314.lavasearch:lavasearch-plugin:1.0.0"
-      repository: "https://maven.lavalink.dev/releases"
     # DuncteBot - TikTok, Reddit, etc - https://github.com/DuncteBot/skybot-lavalink-plugin
     - dependency: "com.dunctebot:skybot-lavalink-plugin:1.7.0"
       repository: "https://maven.lavalink.dev/releases"
     # LavaLyrics - Lyrics support - https://github.com/topi314/LavaLyrics
     - dependency: "com.github.topi314.lavalyrics:lavalyrics-plugin:1.1.0"
       repository: "https://maven.lavalink.dev/releases"
-    # Java Lyrics - More lyrics - https://github.com/DuncteBot/java-timed-lyrics
-    - dependency: "me.duncte123:java-lyrics-plugin:1.6.6"
-      repository: "https://maven.lavalink.dev/releases"
+    # Removed lavasearch-plugin (not essential) and java-lyrics-plugin (redundant with lavalyrics)
 
 metrics:
   prometheus:
@@ -76,7 +71,7 @@ logging:
     lavalink.server.config.SentryConfiguration: ERROR
     io.undertow.websockets.jsr: ERROR
   request:
-    enabled: true
+    enabled: false  # Disabled to reduce log noise from healthchecks
     includeClientInfo: true
     includeHeaders: false
     includeQueryString: true
@@ -86,10 +81,13 @@ plugins:
   # ==================== LYRICS ====================
   lyrics:
     countryCode: FR
+    # Genius API key for lyrics fallback - Get yours at https://genius.com/api-clients
+    geniusApiKey: "eFRPXL2kAqq99R9ZZr0FyqXPY45eLkrT_n7tKIUsnTOu9HiQNtG_TXsaiHgaGY-w"
   lavalyrics:
     sources:
-      - spotify
-      - youtube
+      - lrcLib      # Free lyrics database - first priority
+      - youtube     # YouTube captions
+      # - spotify   # Requires sp_dc cookie - disabled
 
   # ==================== YOUTUBE ====================
   youtube:
@@ -165,9 +163,9 @@ plugins:
       vkmusic: false      # ❌ Requires userToken
       qobuz: false        # ❌ Requires userOauthToken
     lyrics-sources:
-      spotify: true
+      spotify: false      # Requires sp_dc cookie - disabled
       youtube: true
-      lrcLib: true        # LRC Library - free lyrics
+      lrcLib: true        # LRC Library - free lyrics (primary source)
 
     # ==================== SPOTIFY ====================
     # Works without credentials using anonymous tokens!
@@ -255,4 +253,5 @@ plugins:
       ocremix: true     # ocremix.org game remixes
       tiktok: true      # TikTok videos
       mixcloud: true    # Mixcloud streams
-      soundgasm: true   # soundgasm.net
+      soundgasm: false  # soundgasm.net (adult content - disabled)
+      pornhub: false    # PornHub (adult content - disabled)

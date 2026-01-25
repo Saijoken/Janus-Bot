@@ -4,10 +4,11 @@ FROM ghcr.io/lavalink-devs/lavalink:4-alpine
 # Switch to root to install packages
 USER root
 
-# Install eudev (Alpine's udev implementation) and other useful packages
+# Install eudev (Alpine's udev implementation) and wget for healthcheck
 RUN apk add --no-cache \
     eudev \
-    eudev-libs
+    eudev-libs \
+    wget
 
 # Switch back to lavalink user
 USER lavalink

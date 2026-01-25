@@ -1,7 +1,10 @@
 import pg from 'pg';
-import dotenv from 'dotenv';
 
-dotenv.config();
+// Only load dotenv in development (Docker sets env vars directly)
+if (process.env.NODE_ENV !== 'production') {
+    const dotenv = await import('dotenv');
+    dotenv.config();
+}
 
 const { Pool } = pg;
 
@@ -225,11 +228,32 @@ function getParisDate() {
  */
 function getNextMidnightParis() {
     const now = new Date();
-    const parisTime = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Paris' }));
-    const nextMidnight = new Date(parisTime);
-    nextMidnight.setHours(24, 0, 0, 0);
-    const utcOffset = now.getTime() - parisTime.getTime();
-    return new Date(nextMidnight.getTime() - utcOffset);
+    
+    // Get current date in Paris timezone as string parts
+    const parisDateParts = now.toLocaleDateString('en-CA', { 
+        timeZone: 'Europe/Paris',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    }).split('-');
+    
+    const parisTimeParts = now.toLocaleTimeString('en-GB', { 
+        timeZone: 'Europe/Paris',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    }).split(':');
+    
+    // Calculate seconds until midnight Paris time
+    const currentHour = parseInt(parisTimeParts[0]);
+    const currentMinute = parseInt(parisTimeParts[1]);
+    const currentSecond = parseInt(parisTimeParts[2]);
+    
+    const secondsUntilMidnight = ((23 - currentHour) * 3600) + ((59 - currentMinute) * 60) + (60 - currentSecond);
+    
+    // Return a Date object representing next midnight
+    return new Date(now.getTime() + (secondsUntilMidnight * 1000));
 }
 
 /**
@@ -958,6 +982,180 @@ export async function hardResetUser(userId, guildId) {
             message: `Erreur lors de la réinitialisation: ${error.message}`
         };
     }
+}
+
+// ==================== POKEMON FUNCTIONS ====================
+
+/**
+ * Check if user can catch a Pokemon (cooldown check)
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @param {number} cooldownMinutes - Cooldown in minutes (default 5)
+ * @returns {Promise<{canCatch: boolean, remainingTime: number}>}
+ */
+export async function canCatchPokemon(userId, guildId, cooldownMinutes = 5) {
+    const user = await getUser(userId, guildId);
+    
+    if (!user.last_catch) {
+        return { canCatch: true, remainingTime: 0 };
+    }
+    
+    const lastCatch = new Date(user.last_catch);
+    const now = new Date();
+    const diffMs = now - lastCatch;
+    const diffMinutes = diffMs / (1000 * 60);
+    
+    if (diffMinutes >= cooldownMinutes) {
+        return { canCatch: true, remainingTime: 0 };
+    }
+    
+    const remainingMs = (cooldownMinutes * 60 * 1000) - diffMs;
+    return { canCatch: false, remainingTime: remainingMs };
+}
+
+/**
+ * Update last catch time
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ */
+export async function updateLastCatch(userId, guildId) {
+    await pool.query(
+        'UPDATE users SET last_catch = $1 WHERE user_id = $2 AND guild_id = $3',
+        [new Date().toISOString(), userId, guildId]
+    );
+}
+
+/**
+ * Add a caught Pokemon to user's collection
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @param {Object} pokemon - Pokemon data {id, name, isShiny}
+ * @returns {Promise<Object>} Catch result
+ */
+export async function addPokemonCatch(userId, guildId, pokemon) {
+    const { id, name, isShiny } = pokemon;
+    
+    // Add to catches table
+    await pool.query(
+        `INSERT INTO pokemon_catches (user_id, guild_id, pokemon_id, pokemon_name, is_shiny, caught_at)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [userId, guildId, id, name, isShiny, new Date().toISOString()]
+    );
+    
+    // Update or insert into pokedex
+    const existing = await pool.query(
+        'SELECT * FROM pokemon_pokedex WHERE user_id = $1 AND guild_id = $2 AND pokemon_id = $3',
+        [userId, guildId, id]
+    );
+    
+    let isNewEntry = false;
+    let isFirstShiny = false;
+    
+    if (existing.rows.length === 0) {
+        // New Pokedex entry
+        await pool.query(
+            `INSERT INTO pokemon_pokedex (user_id, guild_id, pokemon_id, pokemon_name, caught_count, first_caught_at, shiny_caught)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [userId, guildId, id, name, 1, new Date().toISOString(), isShiny]
+        );
+        isNewEntry = true;
+        isFirstShiny = isShiny;
+    } else {
+        // Update existing entry
+        const updateShiny = isShiny && !existing.rows[0].shiny_caught;
+        isFirstShiny = updateShiny;
+        
+        await pool.query(
+            `UPDATE pokemon_pokedex 
+             SET caught_count = caught_count + 1, shiny_caught = shiny_caught OR $4
+             WHERE user_id = $1 AND guild_id = $2 AND pokemon_id = $3`,
+            [userId, guildId, id, isShiny]
+        );
+    }
+    
+    // Update last catch time
+    await updateLastCatch(userId, guildId);
+    
+    return { isNewEntry, isFirstShiny };
+}
+
+/**
+ * Get user's Pokedex progress
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @returns {Promise<Object[]>} Pokedex entries
+ */
+export async function getPokedex(userId, guildId) {
+    const result = await pool.query(
+        `SELECT * FROM pokemon_pokedex 
+         WHERE user_id = $1 AND guild_id = $2 
+         ORDER BY pokemon_id ASC`,
+        [userId, guildId]
+    );
+    return result.rows;
+}
+
+/**
+ * Get user's Pokemon collection (all catches)
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @param {number} limit - Max results
+ * @param {number} offset - Offset for pagination
+ * @returns {Promise<Object[]>} Pokemon catches
+ */
+export async function getPokemonCollection(userId, guildId, limit = 20, offset = 0) {
+    const result = await pool.query(
+        `SELECT * FROM pokemon_catches 
+         WHERE user_id = $1 AND guild_id = $2 
+         ORDER BY caught_at DESC
+         LIMIT $3 OFFSET $4`,
+        [userId, guildId, limit, offset]
+    );
+    return result.rows;
+}
+
+/**
+ * Get total Pokemon count for user
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @returns {Promise<Object>} Counts {total, unique, shiny}
+ */
+export async function getPokemonCounts(userId, guildId) {
+    const totalResult = await pool.query(
+        'SELECT COUNT(*) as total FROM pokemon_catches WHERE user_id = $1 AND guild_id = $2',
+        [userId, guildId]
+    );
+    
+    const uniqueResult = await pool.query(
+        'SELECT COUNT(*) as unique FROM pokemon_pokedex WHERE user_id = $1 AND guild_id = $2',
+        [userId, guildId]
+    );
+    
+    const shinyResult = await pool.query(
+        'SELECT COUNT(*) as shiny FROM pokemon_catches WHERE user_id = $1 AND guild_id = $2 AND is_shiny = true',
+        [userId, guildId]
+    );
+    
+    return {
+        total: parseInt(totalResult.rows[0].total) || 0,
+        unique: parseInt(uniqueResult.rows[0].unique) || 0,
+        shiny: parseInt(shinyResult.rows[0].shiny) || 0
+    };
+}
+
+/**
+ * Release a Pokemon
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @param {number} catchId - ID of the catch to release
+ * @returns {Promise<boolean>} Success
+ */
+export async function releasePokemon(userId, guildId, catchId) {
+    const result = await pool.query(
+        'DELETE FROM pokemon_catches WHERE id = $1 AND user_id = $2 AND guild_id = $3 RETURNING *',
+        [catchId, userId, guildId]
+    );
+    return result.rowCount > 0;
 }
 
 /**

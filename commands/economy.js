@@ -785,70 +785,308 @@ export async function rebuildProfileEmbed(message, userId, guildId) {
 /**
  * Help command - Show available commands
  */
-export async function helpCommand(message) {
-    const embed = new EmbedBuilder()
-        .setTitle('📚 Commandes du Bot Économie')
-        .setDescription('Toutes les commandes utilisent le préfixe `$`')
-        .addFields(
-            {
-                name: '💰 Commandes Utilisateur',
-                value: [
-                    '`$profile` ou `$p` - Voir votre profil et statistiques complètes',
-                    '`$balance` - Vérifier votre solde de coins',
-                    '`$daily` - Réclamer votre récompense quotidienne (500 coins, reset à minuit)',
-                    '`$work` - Travailler pour gagner des coins (100-500 coins, 5h de cooldown)',
-                    '`$give @user <montant>` - Donner des coins à un autre utilisateur',
-                    '`$leaderboard` - Voir le top 10 des utilisateurs les plus riches',
-                    '`$help` - Afficher ce message d\'aide'
-                ].join('\n'),
-                inline: false
-            },
-            {
-                name: '🎣 Commandes de Pêche',
-                value: [
-                    '`$fish` - Aller pêcher (1 heure de cooldown)',
-                    '`$inventory` - Voir votre inventaire de poissons',
-                    '`$sellfish [nom] [quantité]` - Vendre vos poissons pour des coins'
-                ].join('\n'),
-                inline: false
-            },
-            {
-                name: '🎮 Commandes de Jeu',
-                value: [
-                    '`$roll` - Lancer une pièce (pile ou face)',
-                    '`$pfc [@user]` - Jouer à pierre-feuille-ciseaux (solo ou contre un joueur)',
-                    '`$faaahhh` - Jouer un son dans le canal vocal'
-                ].join('\n'),
-                inline: false
-            },
-            {
-                name: '🎰 Casino Commands',
-                value: [
-                    '`$casino [montant]` - Jouer à la machine à sous',
-                    '• Triple identique : x3 à x5',
-                    '• Double identique : x1.5',
-                    '• Presque gagné : x0.8',
-                    '• Aucun match : Perte'
-                ].join('\n'),
-                inline: false
-            },
-            {
-                name: '🎤 Récompenses Vocales',
-                value: 'Restez dans un canal vocal pendant 30+ minutes pour gagner **50 coins toutes les 30 minutes** !\nRécompenses maximum : **4 heures** (400 coins au total)',
-                inline: false
-            },
-            {
-                name: '⚙️ Commandes Admin',
-                value: [
-                    '`$setbalance @user <montant>` - Définir le solde d\'un utilisateur',
-                    '`$addmoney @user <montant>` - Ajouter de l\'argent à un utilisateur'
-                ].join('\n'),
-                inline: false
-            }
+// Help categories definition
+const HELP_CATEGORIES = {
+    general: {
+        name: '📋 Général',
+        emoji: '📋',
+        color: 0x5865F2,
+        description: 'Commandes générales et informations',
+        commands: [
+            '`$help [catégorie]` - Afficher l\'aide (catégories: general, economie, peche, jeux, casino, musique, pokemon, admin)',
+            '`$profile` ou `$p` - Voir votre profil complet',
+            '`$leaderboard` ou `$lb` - Top 10 des plus riches',
+            '`$say <message>` - Faire parler le bot'
+        ]
+    },
+    economie: {
+        name: '💰 Économie',
+        emoji: '💰',
+        color: 0xF1C40F,
+        description: 'Gagnez et gérez vos coins',
+        commands: [
+            '`$balance` ou `$bal` - Vérifier votre solde',
+            '`$daily` - Récompense quotidienne (500 coins, reset à minuit)',
+            '`$work` - Travailler (100-500 coins, cooldown 5h)',
+            '`$give @user <montant>` - Donner des coins',
+            '',
+            '**🎤 Récompenses Vocales**',
+            'Restez en vocal 30+ min → **50 coins/30min** (max 4h = 400 coins)'
+        ]
+    },
+    peche: {
+        name: '🎣 Pêche',
+        emoji: '🎣',
+        color: 0x3498DB,
+        description: 'Attrapez des poissons et vendez-les',
+        commands: [
+            '`$fish` ou `$peche` - Aller pêcher (cooldown 1h)',
+            '`$inventory` ou `$inv` - Voir vos poissons',
+            '`$sellfish [nom] [qté]` - Vendre vos poissons',
+            '`$sellall` - Vendre tous vos poissons',
+            '`$fishstats` - Voir vos statistiques de pêche',
+            '`$fishtypes` - Liste des poissons et leur rareté',
+            '`$achievements` - Voir vos succès de pêche'
+        ]
+    },
+    jeux: {
+        name: '🎮 Jeux',
+        emoji: '🎮',
+        color: 0xE91E63,
+        description: 'Mini-jeux et divertissement',
+        commands: [
+            '`$roll` - Lancer une pièce (pile ou face)',
+            '`$pfc [@user]` - Pierre-Feuille-Ciseaux',
+            '`$faaahhh` ou `$fah` - Jouer un son en vocal',
+            '`$soundboard` - Liste des sons disponibles'
+        ]
+    },
+    casino: {
+        name: '🎰 Casino',
+        emoji: '🎰',
+        color: 0x9B59B6,
+        description: 'Jeux de hasard et de chance!',
+        commands: [
+            '**🎮 Jeux:**',
+            '`$casino` - Voir tous les jeux',
+            '`$slots <montant>` - Machine à sous',
+            '`$wheel <montant>` - Roue de la fortune',
+            '`$coinflip <montant>` - Pile ou face',
+            '`$duel @joueur <montant>` - 8 mini-jeux VS!',
+            '`$bowser <montant>` - Zone Danger (risqué!)',
+            '`$allin` - Miser TOUT au slots!',
+            '',
+            '**🎮 Mini-jeux Duel (9 jeux):**',
+            '🎲 Dés • 🏇 Course • 🃏 Cartes • ✊ Shifumi',
+            '⚡ Réflexes • 🎰 Slots • 🔢 Nombre • 💣 Bombe • 🧮 Calcul'
+        ]
+    },
+    musique: {
+        name: '🎵 Musique',
+        emoji: '🎵',
+        color: 0x1DB954,
+        description: 'Écoutez de la musique en vocal',
+        commands: [
+            '**Lecture:**',
+            '`$play <url/recherche>` ou `$p` - Jouer une musique',
+            '`$pause` - Mettre en pause',
+            '`$resume` - Reprendre la lecture',
+            '`$skip` ou `$next` - Passer à la suivante',
+            '`$stop` - Arrêter et vider la queue',
+            '',
+            '**File d\'attente:**',
+            '`$queue` ou `$q` - Voir la file d\'attente',
+            '`$nowplaying` ou `$np` - Musique en cours',
+            '`$remove <position>` - Retirer une musique',
+            '`$clear` - Vider la file d\'attente',
+            '',
+            '**Contrôles:**',
+            '`$volume <0-100>` ou `$vol` - Régler le volume',
+            '`$loop` - Activer/désactiver la boucle',
+            '`$shuffle` - Mélanger la queue',
+            '`$seek <secondes>` - Aller à un moment précis',
+            '`$leave` ou `$disconnect` - Quitter le vocal',
+            '',
+            '**Text-to-Speech:**',
+            '`$tts <texte>` - Faire parler le bot',
+            '`$tts -en Hello` - TTS en anglais',
+            '`$tts -fr Bonjour` - TTS en français'
+        ]
+    },
+    pokemon: {
+        name: '🐾 Pokémon',
+        emoji: '🐾',
+        color: 0xFFCB05,
+        description: 'Attrapez-les tous !',
+        commands: [
+            '**Capture:**',
+            '`$catch` ou `$attraper` - Capturer un Pokémon (cooldown 15min)',
+            '⚡ Les légendaires/fabuleux nécessitent un QTE rapide !',
+            '',
+            '**Collection:**',
+            '`$pokedex [page]` ou `$dex` - Voir votre Pokédex',
+            '`$pc [page]` ou `$box` - Voir tous vos Pokémon',
+            '',
+            '**Informations:**',
+            '`$pokemon <nom/numéro>` - Infos sur un Pokémon',
+            '• Recherche en français ou anglais',
+            '• Exemple: `$pokemon dracaufeu` ou `$pokemon 6`',
+            '',
+            '**Test (dev):**',
+            '`$testlegendary` - Tester le système QTE'
+        ]
+    },
+    admin: {
+        name: '⚙️ Administration',
+        emoji: '⚙️',
+        color: 0xE74C3C,
+        description: 'Commandes réservées aux admins',
+        commands: [
+            '`$setbalance @user <montant>` - Définir le solde',
+            '`$addmoney @user <montant>` - Ajouter des coins',
+            '`$removemoney @user <montant>` - Retirer des coins'
+        ]
+    }
+};
+
+// Aliases for category names
+const CATEGORY_ALIASES = {
+    'général': 'general', 'general': 'general', 'gen': 'general',
+    'économie': 'economie', 'economie': 'economie', 'eco': 'economie', 'money': 'economie',
+    'pêche': 'peche', 'peche': 'peche', 'fish': 'peche', 'fishing': 'peche',
+    'jeux': 'jeux', 'games': 'jeux', 'game': 'jeux', 'fun': 'jeux',
+    'casino': 'casino', 'slot': 'casino', 'slots': 'casino', 'gamble': 'casino',
+    'musique': 'musique', 'music': 'musique', 'song': 'musique', 'songs': 'musique',
+    'pokémon': 'pokemon', 'pokemon': 'pokemon', 'poke': 'pokemon', 'pk': 'pokemon',
+    'admin': 'admin', 'administration': 'admin', 'mod': 'admin'
+};
+
+// Emoji to category mapping for reactions
+const EMOJI_TO_CATEGORY = {
+    '📋': 'general',
+    '💰': 'economie',
+    '🎣': 'peche',
+    '🎮': 'jeux',
+    '🎰': 'casino',
+    '🎵': 'musique',
+    '🐾': 'pokemon',
+    '⚙️': 'admin',
+    '🏠': 'home'
+};
+
+// Category order for reactions
+const CATEGORY_ORDER = ['📋', '💰', '🎣', '🎮', '🎰', '🎵', '🐾', '⚙️'];
+
+/**
+ * Create the main help menu embed
+ */
+function createMainHelpEmbed() {
+    return new EmbedBuilder()
+        .setTitle('📚 Aide du Bot')
+        .setDescription(
+            '**Réagissez avec un emoji pour voir une catégorie !**\n\n' +
+            '📋 Général • 💰 Économie • 🎣 Pêche • 🎮 Jeux\n' +
+            '🎰 Casino • 🎵 Musique • 🐾 Pokémon • ⚙️ Admin\n\n' +
+            '*Ou utilisez `$help <catégorie>`*'
         )
-        .setColor(0x0099ff)
-        .setFooter({ text: 'Les nouveaux utilisateurs commencent avec 1000 coins !' })
+        .addFields(
+            Object.entries(HELP_CATEGORIES).map(([key, category]) => ({
+                name: category.name,
+                value: category.description,
+                inline: true
+            }))
+        )
+        .setColor(0x5865F2)
+        .setFooter({ text: 'Préfixe: $ • Réagissez pour naviguer • 🏠 = Menu principal' })
         .setTimestamp();
+}
+
+/**
+ * Create a category embed
+ */
+function createCategoryEmbed(categoryKey) {
+    const category = HELP_CATEGORIES[categoryKey];
+    if (!category) return null;
     
-    await message.reply({ embeds: [embed] });
+    return new EmbedBuilder()
+        .setTitle(`${category.name}`)
+        .setDescription(`${category.description}\n\n${category.commands.join('\n')}`)
+        .setColor(category.color)
+        .setFooter({ text: 'Réagissez 🏠 pour revenir au menu principal' })
+        .setTimestamp();
+}
+
+// Store active help messages for reaction handling
+const activeHelpMessages = new Map();
+
+export async function helpCommand(message, args = []) {
+    const categoryArg = args[0]?.toLowerCase();
+    
+    // If a category is specified, show that category directly (no reactions)
+    if (categoryArg) {
+        const categoryKey = CATEGORY_ALIASES[categoryArg];
+        
+        if (categoryKey && HELP_CATEGORIES[categoryKey]) {
+            const embed = createCategoryEmbed(categoryKey);
+            return message.reply({ embeds: [embed] });
+        } else {
+            return message.reply(`❌ Catégorie inconnue: \`${categoryArg}\`\n\n**Catégories disponibles:** general, economie, peche, jeux, casino, musique, pokemon, admin`);
+        }
+    }
+    
+    // Show main help menu with reactions
+    const embed = createMainHelpEmbed();
+    const helpMsg = await message.reply({ embeds: [embed] });
+    
+    // Add reactions
+    try {
+        for (const emoji of CATEGORY_ORDER) {
+            await helpMsg.react(emoji);
+        }
+        await helpMsg.react('🏠');
+    } catch (error) {
+        console.error('Error adding reactions:', error);
+    }
+    
+    // Store message info for reaction handling
+    activeHelpMessages.set(helpMsg.id, {
+        odiserId: message.author.id,
+        currentView: 'home',
+        createdAt: Date.now()
+    });
+    
+    // Create reaction collector
+    const filter = (reaction, user) => {
+        return !user.bot && 
+               (CATEGORY_ORDER.includes(reaction.emoji.name) || reaction.emoji.name === '🏠');
+    };
+    
+    const collector = helpMsg.createReactionCollector({ 
+        filter, 
+        time: 120000 // 2 minutes
+    });
+    
+    collector.on('collect', async (reaction, user) => {
+        // Remove user's reaction
+        try {
+            await reaction.users.remove(user.id);
+        } catch (error) {
+            // Ignore if we can't remove reaction
+        }
+        
+        const emoji = reaction.emoji.name;
+        const categoryKey = EMOJI_TO_CATEGORY[emoji];
+        
+        if (!categoryKey) return;
+        
+        let newEmbed;
+        if (categoryKey === 'home') {
+            newEmbed = createMainHelpEmbed();
+        } else {
+            newEmbed = createCategoryEmbed(categoryKey);
+        }
+        
+        if (newEmbed) {
+            try {
+                await helpMsg.edit({ embeds: [newEmbed] });
+            } catch (error) {
+                console.error('Error updating help message:', error);
+            }
+        }
+    });
+    
+    collector.on('end', async () => {
+        // Remove from active messages
+        activeHelpMessages.delete(helpMsg.id);
+        
+        // Update embed to show it's no longer interactive
+        try {
+            const finalEmbed = createMainHelpEmbed()
+                .setFooter({ text: 'Ce menu a expiré. Utilisez $help pour un nouveau menu.' });
+            await helpMsg.edit({ embeds: [finalEmbed] });
+            await helpMsg.reactions.removeAll();
+        } catch (error) {
+            // Ignore if message was deleted
+        }
+    });
 }

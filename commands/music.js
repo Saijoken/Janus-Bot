@@ -1,13 +1,17 @@
 import { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } from 'discord.js';
-import { getLyrics, searchSong } from 'genius-lyrics-api';
+import { getLyrics } from 'genius-lyrics-api';
+import lyricsFinder from 'lyrics-finder';
 // Node.js 18+ has native fetch
 
 // Get the Poru client instance
 let poruClient = null;
-let geniusApiKey = null;
+let geniusAccessToken = null;
 
-export function setGeniusApiKey(apiKey) {
-    geniusApiKey = apiKey;
+export function setGeniusApiKey(accessToken) {
+    geniusAccessToken = accessToken;
+    if (accessToken) {
+        console.log('✅ Genius access token configured');
+    }
 }
 
 export function setPlayer(clientInstance) {
@@ -712,6 +716,38 @@ export async function queueCommand(message) {
 }
 
 /**
+ * Shuffle queue command
+ */
+export async function shuffleCommand(message) {
+    if (!poruClient) {
+        await message.reply('❌ Le bot de musique n\'est pas initialisé !');
+        return;
+    }
+
+    const player = poruClient.players.get(message.guild.id);
+    if (!player || player.queue.length < 2) {
+        await message.reply('❌ Il faut au moins 2 chansons dans la file pour mélanger !');
+        return;
+    }
+
+    // Fisher-Yates shuffle algorithm
+    const queue = player.queue;
+    for (let i = queue.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [queue[i], queue[j]] = [queue[j], queue[i]];
+    }
+
+    const embed = new EmbedBuilder()
+        .setTitle('🔀 File mélangée !')
+        .setDescription(`**${queue.length}** chansons ont été mélangées aléatoirement.`)
+        .setColor(0x00ff00)
+        .setFooter({ text: `Demandé par ${message.author.username}` })
+        .setTimestamp();
+
+    await message.reply({ embeds: [embed] });
+}
+
+/**
  * Now playing command
  */
 export async function nowplayingCommand(message) {
@@ -780,7 +816,8 @@ export async function lyricsCommand(message) {
     const track = player.currentTrack;
     const title = track.info.title;
     const author = track.info.author || 'Unknown';
-    const encodedTrack = track.encoded;
+    // Handle both possible property names for encoded track
+    const encodedTrack = track.encoded || track.track;
 
     try {
         await message.channel.sendTyping();
@@ -795,44 +832,147 @@ export async function lyricsCommand(message) {
         const lavalinkPort = process.env.LAVALINK_PORT || '2333';
         const lavalinkPassword = process.env.LAVALINK_PASSWORD || 'youshallnotpass';
 
-        try {
-            // Try java-lyrics-plugin endpoint
-            const lyricsResponse = await fetch(
-                `http://${lavalinkHost}:${lavalinkPort}/v4/lyrics/${encodeURIComponent(encodedTrack)}`,
-                {
-                    headers: {
-                        'Authorization': lavalinkPassword
+        // Method 1: Try LavaLyrics player endpoint (current track)
+        if (player.node?.sessionId) {
+            try {
+                const playerLyricsUrl = `http://${lavalinkHost}:${lavalinkPort}/v4/sessions/${player.node.sessionId}/players/${message.guild.id}/track/lyrics`;
+                const lyricsResponse = await fetch(playerLyricsUrl, {
+                    headers: { 'Authorization': lavalinkPassword }
+                });
+
+                if (lyricsResponse.ok) {
+                    const responseText = await lyricsResponse.text();
+                    if (responseText && responseText.trim()) {
+                        const lyricsData = JSON.parse(responseText);
+                        if (lyricsData && lyricsData.lines && lyricsData.lines.length > 0) {
+                            lyrics = lyricsData.lines.map(line => line.line).join('\n');
+                            source = lyricsData.sourceName || lyricsData.provider || 'Lavalink';
+                        } else if (lyricsData && lyricsData.text) {
+                            lyrics = lyricsData.text;
+                            source = lyricsData.sourceName || lyricsData.provider || 'Lavalink';
+                        }
                     }
                 }
-            );
-
-            if (lyricsResponse.ok) {
-                const lyricsData = await lyricsResponse.json();
-                if (lyricsData && lyricsData.lines && lyricsData.lines.length > 0) {
-                    // Format synced lyrics
-                    lyrics = lyricsData.lines.map(line => line.line).join('\n');
-                    source = lyricsData.source || 'Lavalink';
-                } else if (lyricsData && lyricsData.text) {
-                    lyrics = lyricsData.text;
-                    source = lyricsData.source || 'Lavalink';
-                }
+            } catch (lavalinkError) {
+                // Silent fail - lyrics will be fetched from other sources
             }
-        } catch (lavalinkError) {
-            console.log('Lavalink lyrics not available, trying Genius...');
         }
 
-        // Fallback to Genius if Lavalink didn't work
-        if (!lyrics && geniusApiKey) {
+        // Method 2: Try LavaLyrics track endpoint (with encoded track)
+        if (!lyrics && encodedTrack) {
             try {
-                // Search for the song on Genius API
-                const searchQuery = `${title} ${author}`.replace(/[^\w\s]/g, '').trim();
+                const trackLyricsUrl = `http://${lavalinkHost}:${lavalinkPort}/v4/lyrics?track=${encodeURIComponent(encodedTrack)}`;
+                const lyricsResponse = await fetch(trackLyricsUrl, {
+                    headers: { 'Authorization': lavalinkPassword }
+                });
+
+                if (lyricsResponse.ok) {
+                    const responseText = await lyricsResponse.text();
+                    if (responseText && responseText.trim()) {
+                        const lyricsData = JSON.parse(responseText);
+                        if (lyricsData && lyricsData.lines && lyricsData.lines.length > 0) {
+                            lyrics = lyricsData.lines.map(line => line.line).join('\n');
+                            source = lyricsData.sourceName || lyricsData.provider || 'Lavalink';
+                        } else if (lyricsData && lyricsData.text) {
+                            lyrics = lyricsData.text;
+                            source = lyricsData.sourceName || lyricsData.provider || 'Lavalink';
+                        }
+                    }
+                }
+            } catch (lavalinkError) {
+                // Silent fail - lyrics will be fetched from other sources
+            }
+        }
+
+        // Clean up song title and artist for better search results
+        const cleanTitle = title
+            .replace(/\(.*?\)/g, '') // Remove parentheses content
+            .replace(/\[.*?\]/g, '') // Remove brackets content
+            .replace(/official.*$/i, '') // Remove "Official Video" etc
+            .replace(/lyrics.*$/i, '') // Remove "Lyrics" suffix
+            .replace(/audio.*$/i, '') // Remove "Audio" suffix
+            .replace(/video.*$/i, '') // Remove "Video" suffix
+            .replace(/hd|hq|4k|1080p/gi, '') // Remove quality tags
+            .replace(/ft\.?|feat\.?/gi, '') // Remove featuring
+            .trim();
+        
+        const cleanAuthor = author
+            .replace(/ - Topic$/i, '') // YouTube auto-generated channels
+            .replace(/VEVO$/i, '') // VEVO channels
+            .trim();
+
+        // Helper function with timeout for fetch requests
+        const fetchWithTimeout = (url, options = {}, timeoutMs = 5000) => {
+            return fetch(url, {
+                ...options,
+                signal: AbortSignal.timeout(timeoutMs)
+            });
+        };
+
+        // ============ FAST SOURCES FIRST ============
+
+        // Fallback 1: Try lrclib.net API (free, fast, reliable)
+        if (!lyrics) {
+            try {
+                const lrclibUrl = `https://lrclib.net/api/search?track_name=${encodeURIComponent(cleanTitle)}&artist_name=${encodeURIComponent(cleanAuthor)}`;
+                const lrclibResponse = await fetchWithTimeout(lrclibUrl, {
+                    headers: { 'User-Agent': 'DiscordBot/1.0' }
+                }, 5000);
+                
+                if (lrclibResponse.ok) {
+                    const lrclibData = await lrclibResponse.json();
+                    if (lrclibData && lrclibData.length > 0) {
+                        const song = lrclibData[0];
+                        if (song.syncedLyrics) {
+                            lyrics = song.syncedLyrics
+                                .split('\n')
+                                .map(line => line.replace(/^\[\d{2}:\d{2}\.\d{2}\]\s*/, ''))
+                                .filter(line => line.trim())
+                                .join('\n');
+                        } else if (song.plainLyrics) {
+                            lyrics = song.plainLyrics;
+                        }
+                        if (lyrics) {
+                            lyricsTitle = song.trackName || cleanTitle;
+                            lyricsArtist = song.artistName || cleanAuthor;
+                            source = 'LRCLIB';
+                        }
+                    }
+                }
+            } catch (lrclibError) {
+                // Silent fail - try next source
+            }
+        }
+
+        // Fallback 2: Try lyrics.ovh API (free, fast)
+        if (!lyrics) {
+            try {
+                const lyricsOvhUrl = `https://api.lyrics.ovh/v1/${encodeURIComponent(cleanAuthor)}/${encodeURIComponent(cleanTitle)}`;
+                const ovhResponse = await fetchWithTimeout(lyricsOvhUrl, {}, 5000);
+                
+                if (ovhResponse.ok) {
+                    const ovhData = await ovhResponse.json();
+                    if (ovhData && ovhData.lyrics) {
+                        lyrics = ovhData.lyrics.trim();
+                        lyricsTitle = cleanTitle;
+                        lyricsArtist = cleanAuthor;
+                        source = 'Lyrics.ovh';
+                    }
+                }
+            } catch (ovhError) {
+                // Silent fail - try next source
+            }
+        }
+
+        // Fallback 3: Use Genius API to get correct title/artist, then retry LRCLIB
+        if (!lyrics && geniusAccessToken) {
+            try {
+                const searchQuery = `${cleanTitle} ${cleanAuthor}`.replace(/[^\w\s]/g, '').trim();
                 const searchUrl = `https://api.genius.com/search?q=${encodeURIComponent(searchQuery)}`;
                 
-                const searchResponse = await fetch(searchUrl, {
-                    headers: {
-                        'Authorization': `Bearer ${geniusApiKey}`
-                    }
-                });
+                const searchResponse = await fetchWithTimeout(searchUrl, {
+                    headers: { 'Authorization': `Bearer ${geniusAccessToken}` }
+                }, 5000);
                 
                 if (searchResponse.ok) {
                     const searchData = await searchResponse.json();
@@ -840,61 +980,123 @@ export async function lyricsCommand(message) {
                     
                     if (hits && hits.length > 0) {
                         const song = hits[0].result;
-                        lyricsTitle = song.title || title;
-                        lyricsArtist = song.primary_artist?.name || author;
-                        const lyricsUrl = song.url;
+                        const geniusTitle = song.title;
+                        const geniusArtist = song.primary_artist?.name;
                         
-                        // Fetch the lyrics page with browser-like headers
-                        const pageResponse = await fetch(lyricsUrl, {
-                            headers: {
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                                'Accept-Language': 'en-US,en;q=0.5',
-                                'Accept-Encoding': 'gzip, deflate, br',
-                                'Connection': 'keep-alive',
-                                'Upgrade-Insecure-Requests': '1',
-                                'Sec-Fetch-Dest': 'document',
-                                'Sec-Fetch-Mode': 'navigate',
-                                'Sec-Fetch-Site': 'none',
-                                'Sec-Fetch-User': '?1',
-                                'Cache-Control': 'max-age=0'
-                            }
-                        });
-                        
-                        if (pageResponse.ok) {
-                            const html = await pageResponse.text();
+                        // Try LRCLIB with Genius's corrected song info
+                        if (geniusTitle && geniusArtist) {
+                            const retryUrl = `https://lrclib.net/api/search?track_name=${encodeURIComponent(geniusTitle)}&artist_name=${encodeURIComponent(geniusArtist)}`;
+                            const retryResponse = await fetchWithTimeout(retryUrl, {
+                                headers: { 'User-Agent': 'DiscordBot/1.0' }
+                            }, 5000);
                             
-                            // Extract lyrics from HTML using regex patterns
-                            // Genius uses data-lyrics-container divs
-                            const lyricsMatches = html.match(/data-lyrics-container="true"[^>]*>([\s\S]*?)<\/div>/g);
-                            
-                            if (lyricsMatches && lyricsMatches.length > 0) {
-                                lyrics = lyricsMatches
-                                    .map(match => {
-                                        return match
-                                            .replace(/<br\s*\/?>/gi, '\n')
-                                            .replace(/<[^>]+>/g, '')
-                                            .replace(/&amp;/g, '&')
-                                            .replace(/&lt;/g, '<')
-                                            .replace(/&gt;/g, '>')
-                                            .replace(/&quot;/g, '"')
-                                            .replace(/&#x27;/g, "'")
-                                            .replace(/&#39;/g, "'")
-                                            .trim();
-                                    })
-                                    .join('\n\n');
-                                source = 'Genius';
+                            if (retryResponse.ok) {
+                                const retryData = await retryResponse.json();
+                                if (retryData && retryData.length > 0) {
+                                    const retrySong = retryData[0];
+                                    if (retrySong.syncedLyrics) {
+                                        lyrics = retrySong.syncedLyrics
+                                            .split('\n')
+                                            .map(line => line.replace(/^\[\d{2}:\d{2}\.\d{2}\]\s*/, ''))
+                                            .filter(line => line.trim())
+                                            .join('\n');
+                                    } else if (retrySong.plainLyrics) {
+                                        lyrics = retrySong.plainLyrics;
+                                    }
+                                    if (lyrics) {
+                                        lyricsTitle = geniusTitle;
+                                        lyricsArtist = geniusArtist;
+                                        source = 'LRCLIB (via Genius)';
+                                    }
+                                }
                             }
                         }
                     }
                 }
             } catch (geniusError) {
-                console.log('Genius lyrics error:', geniusError.message);
+                // Silent fail - try next source
+            }
+        }
+
+        // Fallback 4: Try lyrics-finder package (tries multiple sources)
+        if (!lyrics) {
+            try {
+                const finderPromise = lyricsFinder(cleanAuthor, cleanTitle);
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('timeout')), 5000)
+                );
+                const finderLyrics = await Promise.race([finderPromise, timeoutPromise]);
+                
+                if (finderLyrics && finderLyrics.length > 0) {
+                    lyrics = finderLyrics;
+                    lyricsTitle = cleanTitle;
+                    lyricsArtist = cleanAuthor;
+                    source = 'Lyrics Finder';
+                }
+            } catch (finderError) {
+                // Silent fail - try next source
+            }
+        }
+
+        // Fallback 5: Try lyrics-scraper service (Puppeteer-based, slower)
+        if (!lyrics) {
+            try {
+                const scraperHost = process.env.LYRICS_SCRAPER_HOST || 'lyrics-scraper';
+                const scraperPort = process.env.LYRICS_SCRAPER_PORT || '3500';
+                const scraperToken = process.env.LYRICS_SCRAPER_TOKEN || 'lyrics-secret';
+                
+                const scraperUrl = `http://${scraperHost}:${scraperPort}/lyrics?artist=${encodeURIComponent(cleanAuthor)}&title=${encodeURIComponent(cleanTitle)}`;
+                
+                const scraperResponse = await fetchWithTimeout(scraperUrl, {
+                    headers: { 'Authorization': `Bearer ${scraperToken}` }
+                }, 15000); // 15 second timeout for Puppeteer
+                
+                if (scraperResponse.ok) {
+                    const scraperData = await scraperResponse.json();
+                    if (scraperData && scraperData.lyrics) {
+                        lyrics = scraperData.lyrics;
+                        lyricsTitle = scraperData.title || cleanTitle;
+                        lyricsArtist = scraperData.artist || cleanAuthor;
+                        source = 'Genius';
+                    }
+                }
+            } catch (scraperError) {
+                // Silent fail
+            }
+        }
+
+        // ============ SLOW SOURCES (Genius scraping - often blocked) ============
+        // These are last resort as they often get 403 from Cloudflare
+        
+        // Fallback 6: Try genius-lyrics-api package (scraping)
+        if (!lyrics && geniusAccessToken) {
+            try {
+                const options = {
+                    apiKey: geniusAccessToken,
+                    title: cleanTitle,
+                    artist: cleanAuthor,
+                    optimizeQuery: true
+                };
+                
+                const geniusPromise = getLyrics(options);
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('timeout')), 8000)
+                );
+                const geniusLyrics = await Promise.race([geniusPromise, timeoutPromise]);
+                
+                if (geniusLyrics && geniusLyrics.length > 0) {
+                    lyrics = geniusLyrics;
+                    lyricsTitle = cleanTitle;
+                    lyricsArtist = cleanAuthor;
+                    source = 'Genius';
+                }
+            } catch (geniusApiError) {
+                // Silent fail - Cloudflare likely blocking
             }
         }
 
         if (!lyrics) {
-            await message.reply(`❌ Aucune parole trouvée pour **${title}** par **${author}**`);
+            await message.reply(`❌ Aucune parole trouvée pour **${title}** par **${author}**\n💡 *Les chansons françaises ne sont pas toujours disponibles dans les bases de données de paroles.*`);
             return;
         }
 
@@ -945,4 +1147,211 @@ export async function lyricsCommand(message) {
 export async function checkAutoDisconnect(guild) {
     // Poru handles auto-disconnect automatically via playerEmpty event
     // This function is kept for compatibility
+}
+
+/**
+ * TTS Command - Text to Speech
+ * Uses Lavalink's TTS feature for voice synthesis
+ * Supports: DuncteBot (speak:) and Flowery TTS (ftts://)
+ */
+export async function ttsCommand(message, args) {
+    if (!poruClient) {
+        return message.reply('❌ Le bot de musique n\'est pas initialisé !');
+    }
+
+    const member = message.member;
+    if (!member || !member.voice.channel) {
+        return message.reply('❌ Vous devez être dans un canal vocal pour utiliser cette commande !');
+    }
+
+    if (!args || args.length === 0) {
+        const embed = new EmbedBuilder()
+            .setTitle('🔊 Text-to-Speech (TTS)')
+            .setDescription(
+                '**Usage:** `$tts <texte>`\n\n' +
+                '**Exemples:**\n' +
+                '• `$tts Bonjour tout le monde !`\n' +
+                '• `$tts Hello this is a test`\n\n' +
+                '**Voix masculines:**\n' +
+                '• `$tts -rene Bonjour` - René (FR) ⭐ *par défaut*\n' +
+                '• `$tts -daniel Hello` - Daniel (EN-UK)\n' +
+                '• `$tts -guy Hello` - Guy (EN-US)\n' +
+                '• `$tts -hans Hallo` - Hans (DE)\n' +
+                '• `$tts -luca Ciao` - Luca (IT)\n\n' +
+                '**Voix féminines:**\n' +
+                '• `$tts -emma Hello` - Emma (EN-US)\n' +
+                '• `$tts -denise Bonjour` - Denise (FR)\n' +
+                '• `$tts -lucia Hola` - Lucia (ES)'
+            )
+            .setColor(0x5865F2)
+            .setFooter({ text: 'Voix par défaut: René (FR) | Flowery TTS' });
+        return message.reply({ embeds: [embed] });
+    }
+
+    // Voice mapping for Flowery TTS
+    const voiceMap = {
+        // English
+        'emma': 'Emma', 'daniel': 'Daniel', 'aria': 'Aria', 'guy': 'Guy',
+        // French
+        'rene': 'René', 'denise': 'Denise', 'henri': 'Henri',
+        // German
+        'hans': 'Hans', 'katja': 'Katja',
+        // Spanish
+        'lucia': 'Lucia', 'pablo': 'Pablo',
+        // Italian
+        'luca': 'Luca', 'elsa': 'Elsa',
+        // Portuguese
+        'cristiano': 'Cristiano',
+        // Japanese
+        'keita': 'Keita', 'nanami': 'Nanami',
+        // Other
+        'brian': 'Brian'
+    };
+
+    let text = args.join(' ');
+    let voice = null;
+    let useFlowery = false;
+    
+    // Check for voice flag at the start (e.g., -emma, -rene)
+    const voiceMatch = text.match(/^-([a-z]+)\s+(.+)$/i);
+    if (voiceMatch) {
+        const requestedVoice = voiceMatch[1].toLowerCase();
+        if (voiceMap[requestedVoice]) {
+            voice = voiceMap[requestedVoice];
+            text = voiceMatch[2];
+            useFlowery = true;
+        }
+    }
+
+    // Clean up text
+    text = text.trim();
+    if (!text) {
+        return message.reply('❌ Veuillez fournir un texte à lire !');
+    }
+
+    // Limit text length
+    if (text.length > 500) {
+        return message.reply('❌ Le texte est trop long ! Maximum 500 caractères.');
+    }
+
+    try {
+        // Create or get player
+        let player = poruClient.players.get(message.guild.id);
+        
+        if (!player) {
+            player = poruClient.createConnection({
+                guildId: message.guild.id,
+                voiceChannel: member.voice.channel.id,
+                textChannel: message.channel.id,
+                deaf: true,
+                mute: false
+            });
+        } else if (player.voiceChannel !== member.voice.channel.id) {
+            return message.reply('❌ Vous devez être dans le même canal vocal que le bot !');
+        }
+
+        // Build TTS queries to try - order matters!
+        const ttsQueries = [];
+        
+        // Priority order: Flowery TTS first (male voice), then DuncteBot as fallback
+        
+        if (useFlowery && voice) {
+            // Flowery TTS with user-specified voice
+            ttsQueries.push(`ftts://${encodeURIComponent(text)}?voice=${voice}`);
+        } else {
+            // Flowery TTS with default male voice (René - French)
+            ttsQueries.push(`ftts://${encodeURIComponent(text)}?voice=René`);
+        }
+        
+        // DuncteBot TTS as fallback (uses Google Translate - female voice)
+        ttsQueries.push(`speak:${text}`);
+
+        let result = null;
+        let usedQuery = null;
+
+        // Get the Lavalink node to make direct REST calls
+        const node = poruClient.leastUsedNodes[0];
+        if (!node) {
+            return message.reply('❌ Aucun nœud Lavalink disponible.');
+        }
+
+        for (const query of ttsQueries) {
+            try {
+                console.log(`🔊 Trying TTS query: ${query.substring(0, 60)}...`);
+                
+                // Make direct REST call to Lavalink to avoid Poru's default source prefix
+                const url = `http://${node.options.host}:${node.options.port}/v4/loadtracks?identifier=${encodeURIComponent(query)}`;
+                const response = await fetch(url, {
+                    headers: {
+                        'Authorization': node.options.password
+                    }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log(`📊 TTS response for ${query.substring(0, 30)}:`, data.loadType);
+                    
+                    if (data.loadType === 'track' && data.data) {
+                        result = { tracks: [data.data] };
+                        usedQuery = query;
+                        console.log(`✅ TTS success with: ${query.substring(0, 50)}...`);
+                        break;
+                    } else if (data.loadType === 'search' && data.data?.length > 0) {
+                        result = { tracks: data.data };
+                        usedQuery = query;
+                        console.log(`✅ TTS success with: ${query.substring(0, 50)}...`);
+                        break;
+                    }
+                }
+            } catch (e) {
+                console.log(`❌ TTS failed for ${query.substring(0, 30)}...: ${e.message}`);
+                continue;
+            }
+        }
+
+        if (!result || !result.tracks || result.tracks.length === 0) {
+            return message.reply('❌ Impossible de générer le TTS. Vérifiez que Lavalink a les plugins TTS (DuncteBot ou LavaSrc) correctement configurés.');
+        }
+
+        // Create a Poru-compatible track object from Lavalink REST response
+        const trackData = result.tracks[0];
+        
+        // The track object needs to match Poru's expected structure
+        const track = {
+            track: trackData.encoded,
+            encoded: trackData.encoded,
+            info: {
+                ...trackData.info,
+                requester: message.author
+            },
+            pluginInfo: trackData.pluginInfo || {},
+            userData: trackData.userData || {}
+        };
+        
+        player.queue.add(track);
+
+        const embed = new EmbedBuilder()
+            .setTitle('🔊 TTS Ajouté')
+            .setDescription(`"${text.substring(0, 150)}${text.length > 150 ? '...' : ''}"`)
+            .addFields(
+                { name: '🎙️ Voix', value: voice || 'Par défaut', inline: true },
+                { name: '📝 Caractères', value: `${text.length}`, inline: true },
+                { name: '🔧 Source', value: usedQuery?.startsWith('ftts') ? 'Flowery TTS' : 'DuncteBot', inline: true }
+            )
+            .setColor(0x5865F2)
+            .setFooter({ text: `Demandé par ${message.author.username}` });
+
+        if (!player.isPlaying && !player.isPaused) {
+            await player.play();
+            embed.setTitle('🔊 TTS en lecture');
+        } else {
+            embed.addFields({ name: '📋 Position', value: `#${player.queue.length}`, inline: true });
+        }
+
+        await message.reply({ embeds: [embed] });
+
+    } catch (error) {
+        console.error('TTS Error:', error);
+        await message.reply('❌ Une erreur est survenue lors de la génération du TTS.');
+    }
 }
