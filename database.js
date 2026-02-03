@@ -1271,6 +1271,81 @@ export async function releasePokemon(userId, guildId, catchId) {
 }
 
 /**
+ * Get a specific Pokemon catch by its catch ID (row ID)
+ * @param {number} catchId - The catch row ID
+ * @returns {Promise<Object|null>} Pokemon catch data or null
+ */
+export async function getCatchByRowId(catchId) {
+    const result = await pool.query(
+        'SELECT * FROM pokemon_catches WHERE id = $1',
+        [catchId]
+    );
+    return result.rows[0] || null;
+}
+
+/**
+ * Get Pokemon catch by slot number (1-indexed, ordered by caught_at DESC)
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @param {number} slot - 1-indexed slot number
+ * @returns {Promise<Object|null>} Pokemon catch data or null
+ */
+export async function getPokemonBySlot(userId, guildId, slot) {
+    const result = await pool.query(
+        `SELECT * FROM pokemon_catches 
+         WHERE user_id = $1 AND guild_id = $2 
+         ORDER BY caught_at DESC
+         LIMIT 1 OFFSET $3`,
+        [userId, guildId, slot - 1]
+    );
+    return result.rows[0] || null;
+}
+
+/**
+ * Trade Pokemon between two users
+ * Swaps ownership of two Pokemon catches
+ * @param {Object} pokemon1 - {catchId, fromUserId, fromGuildId}
+ * @param {Object} pokemon2 - {catchId, toUserId, toGuildId}
+ * @returns {Promise<boolean>} Success
+ */
+export async function tradePokemon(pokemon1, pokemon2) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        
+        // Get both Pokemon to verify they exist
+        const p1 = await client.query('SELECT * FROM pokemon_catches WHERE id = $1 AND user_id = $2', 
+            [pokemon1.catchId, pokemon1.userId]);
+        const p2 = await client.query('SELECT * FROM pokemon_catches WHERE id = $1 AND user_id = $2', 
+            [pokemon2.catchId, pokemon2.userId]);
+        
+        if (p1.rows.length === 0 || p2.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return false;
+        }
+        
+        // Swap ownership
+        await client.query(
+            'UPDATE pokemon_catches SET user_id = $1, guild_id = $2 WHERE id = $3',
+            [pokemon2.userId, pokemon2.guildId, pokemon1.catchId]
+        );
+        await client.query(
+            'UPDATE pokemon_catches SET user_id = $1, guild_id = $2 WHERE id = $3',
+            [pokemon1.userId, pokemon1.guildId, pokemon2.catchId]
+        );
+        
+        await client.query('COMMIT');
+        return true;
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Trade error:', error);
+        return false;
+    } finally {
+        client.release();
+    }
+}
+
+/**
  * Close database connection
  */
 export async function closeDatabase() {

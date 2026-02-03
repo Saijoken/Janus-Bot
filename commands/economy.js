@@ -1882,19 +1882,21 @@ const HELP_CATEGORIES = {
             '`$dex legendary/mythical/starter/pseudo/shiny` - Filtrer le Pokédex',
             '`$pc [page]` ou `$box` - Voir tous vos Pokémon capturés',
             '',
+            '**Échange:**',
+            '`$trade @user <slot>` - Proposer un échange',
+            '`$trade accept <slot>` - Accepter un échange',
+            '`$trade cancel` - Annuler un échange',
+            '',
             '**Évolution:**',
             '`$evolve <n° Pokédex>` - Faire évoluer un Pokémon',
             '`$evolve <n°> mega [pierre]` - Méga-évolution',
-            '• Coûts: 3k/10k/20k (normal) ou 10k/20k/50k (spécial)',
             '',
             '**Méga-Pierres:**',
             '`$megashop` - Voir la boutique des Méga-Pierres',
             '`$megashop buy <pierre>` - Acheter une Méga-Pierre',
             '',
             '**Informations:**',
-            '`$pokemon <nom/numéro>` - Infos sur un Pokémon',
-            '• Recherche en français ou anglais (1025 Pokémon)',
-            '• Exemple: `$pokemon dracaufeu` ou `$pokemon 6`'
+            '`$pokemon <nom/numéro>` - Infos sur un Pokémon'
         ]
     },
     admin: {

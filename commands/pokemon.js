@@ -2695,3 +2695,702 @@ export async function handlePokemonInteraction(interaction) {
     
     return true;
 }
+
+// ============================================================================
+// TRADE SYSTEM
+// ============================================================================
+
+// Active trade sessions: Map<tradeId, TradeSession>
+const activeTrades = new Map();
+
+/**
+ * Generate trade request image showing the Pokemon being offered
+ */
+async function generateTradeOfferImage(pokemon, species, isShiny) {
+    const width = 400;
+    const height = 300;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    
+    // Background gradient (blue trade theme)
+    const gradient = ctx.createLinearGradient(0, 0, width, height);
+    gradient.addColorStop(0, '#1a237e');
+    gradient.addColorStop(0.5, '#283593');
+    gradient.addColorStop(1, '#1a237e');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+    
+    // Decorative circles (like Pokeball pattern)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(width / 2, height / 2, 100, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(width / 2, height / 2, 80, 0, Math.PI * 2);
+    ctx.stroke();
+    
+    // Pokemon sprite
+    const spriteUrl = isShiny 
+        ? (pokemon.sprites.other?.['official-artwork']?.front_shiny || pokemon.sprites.front_shiny)
+        : (pokemon.sprites.other?.['official-artwork']?.front_default || pokemon.sprites.front_default);
+    
+    if (spriteUrl) {
+        try {
+            const sprite = await loadImage(spriteUrl);
+            const spriteSize = 180;
+            const spriteX = (width - spriteSize) / 2;
+            const spriteY = 50;
+            
+            // Glow effect for shiny
+            if (isShiny) {
+                ctx.shadowColor = '#FFD700';
+                ctx.shadowBlur = 20;
+            }
+            
+            ctx.drawImage(sprite, spriteX, spriteY, spriteSize, spriteSize);
+            ctx.shadowBlur = 0;
+        } catch (e) {
+            console.error('Error loading sprite:', e);
+        }
+    }
+    
+    // Pokemon name
+    const frenchName = getFrenchName(species, pokemon.name);
+    ctx.fillStyle = isShiny ? '#FFD700' : '#FFFFFF';
+    ctx.font = 'bold 24px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(isShiny ? `✨ ${frenchName} ✨` : frenchName, width / 2, 260);
+    
+    // "TRADE OFFER" text
+    ctx.fillStyle = '#4FC3F7';
+    ctx.font = 'bold 16px Arial';
+    ctx.fillText('OFFRE D\'ÉCHANGE', width / 2, 285);
+    
+    return canvas.toBuffer('image/png');
+}
+
+/**
+ * Generate trade confirmation image showing both Pokemon
+ */
+async function generateTradeConfirmImage(pokemon1Data, pokemon2Data) {
+    const width = 600;
+    const height = 350;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    
+    // Background gradient
+    const gradient = ctx.createLinearGradient(0, 0, width, height);
+    gradient.addColorStop(0, '#1a237e');
+    gradient.addColorStop(0.5, '#4a148c');
+    gradient.addColorStop(1, '#1a237e');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+    
+    // Center dividing line with arrows
+    ctx.strokeStyle = '#4FC3F7';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(width / 2, 50);
+    ctx.lineTo(width / 2, height - 50);
+    ctx.stroke();
+    
+    // Trade arrows
+    ctx.fillStyle = '#4FC3F7';
+    ctx.font = 'bold 40px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('⇄', width / 2, height / 2 + 10);
+    
+    // Draw both Pokemon
+    const drawPokemon = async (data, x, isLeft) => {
+        const { pokemon, species, isShiny, ownerName } = data;
+        const spriteUrl = isShiny 
+            ? (pokemon.sprites.other?.['official-artwork']?.front_shiny || pokemon.sprites.front_shiny)
+            : (pokemon.sprites.other?.['official-artwork']?.front_default || pokemon.sprites.front_default);
+        
+        // Circular background
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+        ctx.beginPath();
+        ctx.arc(x, 150, 90, 0, Math.PI * 2);
+        ctx.fill();
+        
+        if (spriteUrl) {
+            try {
+                const sprite = await loadImage(spriteUrl);
+                const size = 140;
+                if (isShiny) {
+                    ctx.shadowColor = '#FFD700';
+                    ctx.shadowBlur = 15;
+                }
+                ctx.drawImage(sprite, x - size / 2, 80, size, size);
+                ctx.shadowBlur = 0;
+            } catch (e) {}
+        }
+        
+        // Pokemon name
+        const frenchName = getFrenchName(species, pokemon.name);
+        ctx.fillStyle = isShiny ? '#FFD700' : '#FFFFFF';
+        ctx.font = 'bold 18px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(isShiny ? `✨ ${frenchName}` : frenchName, x, 250);
+        
+        // Owner name
+        ctx.fillStyle = '#90CAF9';
+        ctx.font = '14px Arial';
+        ctx.fillText(ownerName, x, 275);
+    };
+    
+    await drawPokemon(pokemon1Data, 150, true);
+    await drawPokemon(pokemon2Data, 450, false);
+    
+    // Title
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 22px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('CONFIRMATION D\'ÉCHANGE', width / 2, 30);
+    
+    // Footer instruction
+    ctx.fillStyle = '#81C784';
+    ctx.font = '14px Arial';
+    ctx.fillText('Les deux joueurs doivent confirmer', width / 2, height - 20);
+    
+    return canvas.toBuffer('image/png');
+}
+
+/**
+ * Generate trade animation image (Pokeballs with energy)
+ */
+async function generateTradeAnimationImage(step = 1) {
+    const width = 500;
+    const height = 300;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    
+    // Dark background with energy effect
+    const gradient = ctx.createRadialGradient(width / 2, height / 2, 0, width / 2, height / 2, 250);
+    gradient.addColorStop(0, '#311B92');
+    gradient.addColorStop(0.5, '#1A237E');
+    gradient.addColorStop(1, '#0D1421');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+    
+    // Energy rings based on step
+    const ringColors = ['#4FC3F7', '#81D4FA', '#B3E5FC'];
+    for (let i = 0; i < 3; i++) {
+        const radius = 60 + (i * 30) + (step * 10);
+        ctx.strokeStyle = ringColors[i];
+        ctx.lineWidth = 3 - i;
+        ctx.globalAlpha = 0.7 - (i * 0.2);
+        ctx.beginPath();
+        ctx.arc(width / 2, height / 2, radius, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    
+    // Draw Pokeballs moving towards center
+    const drawPokeball = (x, y, size) => {
+        // Pokeball body (red top)
+        ctx.fillStyle = '#E53935';
+        ctx.beginPath();
+        ctx.arc(x, y, size, Math.PI, 0);
+        ctx.fill();
+        
+        // Pokeball body (white bottom)
+        ctx.fillStyle = '#FFFFFF';
+        ctx.beginPath();
+        ctx.arc(x, y, size, 0, Math.PI);
+        ctx.fill();
+        
+        // Center line
+        ctx.fillStyle = '#212121';
+        ctx.fillRect(x - size, y - 3, size * 2, 6);
+        
+        // Center button
+        ctx.fillStyle = '#FFFFFF';
+        ctx.beginPath();
+        ctx.arc(x, y, size * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#212121';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        
+        // Inner button
+        ctx.fillStyle = '#BDBDBD';
+        ctx.beginPath();
+        ctx.arc(x, y, size * 0.15, 0, Math.PI * 2);
+        ctx.fill();
+    };
+    
+    // Animate Pokeballs based on step
+    const offset = Math.max(0, 150 - (step * 50));
+    drawPokeball(width / 2 - offset, height / 2, 35);
+    drawPokeball(width / 2 + offset, height / 2, 35);
+    
+    // Trading text
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 24px Arial';
+    ctx.textAlign = 'center';
+    const texts = ['Échange en cours...', 'Transfert...', 'Échange réussi !'];
+    ctx.fillText(texts[Math.min(step - 1, 2)], width / 2, height - 40);
+    
+    return canvas.toBuffer('image/png');
+}
+
+/**
+ * Generate trade complete image showing the result
+ */
+async function generateTradeCompleteImage(pokemon1Data, pokemon2Data) {
+    const width = 600;
+    const height = 350;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    
+    // Success gradient background
+    const gradient = ctx.createLinearGradient(0, 0, width, height);
+    gradient.addColorStop(0, '#1B5E20');
+    gradient.addColorStop(0.5, '#2E7D32');
+    gradient.addColorStop(1, '#1B5E20');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+    
+    // Success stars/sparkles
+    ctx.fillStyle = '#FFEB3B';
+    ctx.font = '20px Arial';
+    const stars = ['✨', '⭐', '✨', '⭐', '✨'];
+    stars.forEach((star, i) => {
+        ctx.fillText(star, 50 + i * 125, 40);
+    });
+    
+    // Draw Pokemon with new owners
+    const drawResult = async (data, x, newOwner) => {
+        const { pokemon, species, isShiny } = data;
+        const spriteUrl = isShiny 
+            ? (pokemon.sprites.other?.['official-artwork']?.front_shiny || pokemon.sprites.front_shiny)
+            : (pokemon.sprites.other?.['official-artwork']?.front_default || pokemon.sprites.front_default);
+        
+        if (spriteUrl) {
+            try {
+                const sprite = await loadImage(spriteUrl);
+                const size = 130;
+                if (isShiny) {
+                    ctx.shadowColor = '#FFD700';
+                    ctx.shadowBlur = 15;
+                }
+                ctx.drawImage(sprite, x - size / 2, 70, size, size);
+                ctx.shadowBlur = 0;
+            } catch (e) {}
+        }
+        
+        const frenchName = getFrenchName(species, pokemon.name);
+        ctx.fillStyle = isShiny ? '#FFD700' : '#FFFFFF';
+        ctx.font = 'bold 18px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(isShiny ? `✨ ${frenchName}` : frenchName, x, 230);
+        
+        // New owner with arrow
+        ctx.fillStyle = '#A5D6A7';
+        ctx.font = '14px Arial';
+        ctx.fillText(`→ ${newOwner}`, x, 255);
+    };
+    
+    // Pokemon1 goes to User2, Pokemon2 goes to User1
+    await drawResult(pokemon1Data, 150, pokemon2Data.ownerName);
+    await drawResult(pokemon2Data, 450, pokemon1Data.ownerName);
+    
+    // Success icon
+    ctx.fillStyle = '#4CAF50';
+    ctx.font = 'bold 50px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('✓', width / 2, 180);
+    
+    // Title
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 26px Arial';
+    ctx.fillText('ÉCHANGE RÉUSSI !', width / 2, 320);
+    
+    return canvas.toBuffer('image/png');
+}
+
+/**
+ * Trade command - Initiate or respond to a trade
+ * Usage: $trade @user <slot> - Start a trade
+ *        $trade accept <slot> - Accept a pending trade
+ *        $trade cancel - Cancel your pending trade
+ */
+export async function tradeCommand(message, args) {
+    const userId = message.author.id;
+    const guildId = message.guild.id;
+    
+    // Check for cancel
+    if (args[0]?.toLowerCase() === 'cancel' || args[0]?.toLowerCase() === 'annuler') {
+        // Find and cancel any trade involving this user
+        for (const [tradeId, trade] of activeTrades.entries()) {
+            if (trade.user1.id === userId || trade.user2?.id === userId) {
+                activeTrades.delete(tradeId);
+                return message.reply('❌ Échange annulé.');
+            }
+        }
+        return message.reply('❌ Vous n\'avez aucun échange en cours.');
+    }
+    
+    // Check for accept
+    if (args[0]?.toLowerCase() === 'accept' || args[0]?.toLowerCase() === 'accepter') {
+        const slot = parseInt(args[1]);
+        if (!slot || slot < 1) {
+            return message.reply('❌ Usage: `$trade accept <slot>` - Numéro du Pokémon dans votre PC');
+        }
+        
+        // Find pending trade for this user
+        let pendingTrade = null;
+        for (const [tradeId, trade] of activeTrades.entries()) {
+            if (trade.user2Id === userId && trade.status === 'pending') {
+                pendingTrade = trade;
+                break;
+            }
+        }
+        
+        if (!pendingTrade) {
+            return message.reply('❌ Vous n\'avez aucune demande d\'échange en attente.');
+        }
+        
+        // Get user2's Pokemon
+        const pokemon2Catch = await db.getPokemonBySlot(userId, guildId, slot);
+        if (!pokemon2Catch) {
+            return message.reply(`❌ Vous n\'avez pas de Pokémon au slot ${slot}.`);
+        }
+        
+        const pokemon2 = await fetchPokemon(pokemon2Catch.pokemon_id);
+        const species2 = await fetchSpecies(pokemon2Catch.pokemon_id);
+        if (!pokemon2) {
+            return message.reply('❌ Erreur lors du chargement du Pokémon.');
+        }
+        
+        // Update trade with user2's selection
+        pendingTrade.user2 = {
+            id: userId,
+            name: message.author.username,
+            pokemon: pokemon2,
+            species: species2,
+            catch: pokemon2Catch,
+            confirmed: false
+        };
+        pendingTrade.status = 'confirming';
+        
+        // Generate confirmation image
+        const confirmImage = await generateTradeConfirmImage(
+            {
+                pokemon: pendingTrade.user1.pokemon,
+                species: pendingTrade.user1.species,
+                isShiny: pendingTrade.user1.catch.is_shiny,
+                ownerName: pendingTrade.user1.name
+            },
+            {
+                pokemon: pokemon2,
+                species: species2,
+                isShiny: pokemon2Catch.is_shiny,
+                ownerName: message.author.username
+            }
+        );
+        
+        const attachment = new AttachmentBuilder(confirmImage, { name: 'trade_confirm.png' });
+        
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`trade_confirm_${pendingTrade.id}_${pendingTrade.user1.id}`)
+                .setLabel(`${pendingTrade.user1.name} confirme`)
+                .setStyle(ButtonStyle.Success)
+                .setEmoji('✓'),
+            new ButtonBuilder()
+                .setCustomId(`trade_confirm_${pendingTrade.id}_${userId}`)
+                .setLabel(`${message.author.username} confirme`)
+                .setStyle(ButtonStyle.Success)
+                .setEmoji('✓'),
+            new ButtonBuilder()
+                .setCustomId(`trade_cancel_${pendingTrade.id}`)
+                .setLabel('Annuler')
+                .setStyle(ButtonStyle.Danger)
+                .setEmoji('✕')
+        );
+        
+        const name1 = getFrenchName(pendingTrade.user1.species, pendingTrade.user1.pokemon.name);
+        const name2 = getFrenchName(species2, pokemon2.name);
+        
+        const embed = new EmbedBuilder()
+            .setTitle('🔄 Confirmation d\'échange')
+            .setDescription(
+                `**${pendingTrade.user1.name}** échange **${name1}**${pendingTrade.user1.catch.is_shiny ? ' ✨' : ''}\n` +
+                `**${message.author.username}** échange **${name2}**${pokemon2Catch.is_shiny ? ' ✨' : ''}\n\n` +
+                `Les deux joueurs doivent cliquer sur leur bouton pour confirmer.`
+            )
+            .setImage('attachment://trade_confirm.png')
+            .setColor(0x9C27B0)
+            .setFooter({ text: 'L\'échange expire dans 2 minutes' });
+        
+        pendingTrade.confirmMessage = await message.reply({ 
+            embeds: [embed], 
+            files: [attachment],
+            components: [row]
+        });
+        
+        // Set timeout to expire trade
+        setTimeout(() => {
+            if (activeTrades.has(pendingTrade.id) && activeTrades.get(pendingTrade.id).status !== 'completed') {
+                activeTrades.delete(pendingTrade.id);
+            }
+        }, 120000);
+        
+        return;
+    }
+    
+    // Initiate new trade
+    const targetUser = message.mentions.users.first();
+    if (!targetUser) {
+        return message.reply(
+            '❌ **Usage:**\n' +
+            '`$trade @utilisateur <slot>` - Proposer un échange\n' +
+            '`$trade accept <slot>` - Accepter un échange\n' +
+            '`$trade cancel` - Annuler un échange'
+        );
+    }
+    
+    if (targetUser.id === userId) {
+        return message.reply('❌ Vous ne pouvez pas échanger avec vous-même !');
+    }
+    
+    if (targetUser.bot) {
+        return message.reply('❌ Vous ne pouvez pas échanger avec un bot !');
+    }
+    
+    const slot = parseInt(args[1]);
+    if (!slot || slot < 1) {
+        return message.reply('❌ Spécifiez le numéro du Pokémon dans votre PC. Ex: `$trade @user 1`');
+    }
+    
+    // Check if user already has pending trade
+    for (const trade of activeTrades.values()) {
+        if (trade.user1.id === userId && trade.status === 'pending') {
+            return message.reply('❌ Vous avez déjà un échange en attente. Utilisez `$trade cancel` pour l\'annuler.');
+        }
+    }
+    
+    // Get user's Pokemon
+    const pokemonCatch = await db.getPokemonBySlot(userId, guildId, slot);
+    if (!pokemonCatch) {
+        return message.reply(`❌ Vous n'avez pas de Pokémon au slot ${slot}. Vérifiez avec \`$pc\`.`);
+    }
+    
+    const pokemon = await fetchPokemon(pokemonCatch.pokemon_id);
+    const species = await fetchSpecies(pokemonCatch.pokemon_id);
+    if (!pokemon) {
+        return message.reply('❌ Erreur lors du chargement du Pokémon.');
+    }
+    
+    // Create trade session
+    const tradeId = `${userId}_${targetUser.id}_${Date.now()}`;
+    const trade = {
+        id: tradeId,
+        user1: {
+            id: userId,
+            name: message.author.username,
+            pokemon: pokemon,
+            species: species,
+            catch: pokemonCatch,
+            confirmed: false
+        },
+        user2Id: targetUser.id,
+        user2: null,
+        guildId: guildId,
+        status: 'pending',
+        createdAt: Date.now()
+    };
+    activeTrades.set(tradeId, trade);
+    
+    // Generate offer image
+    const offerImage = await generateTradeOfferImage(pokemon, species, pokemonCatch.is_shiny);
+    const attachment = new AttachmentBuilder(offerImage, { name: 'trade_offer.png' });
+    
+    const frenchName = getFrenchName(species, pokemon.name);
+    const embed = new EmbedBuilder()
+        .setTitle('🔄 Demande d\'échange')
+        .setDescription(
+            `**${message.author.username}** veut échanger avec **${targetUser.username}** !\n\n` +
+            `**Pokémon proposé:** ${frenchName}${pokemonCatch.is_shiny ? ' ✨' : ''}\n` +
+            `**#${pokemonCatch.pokemon_id}** • ${pokemonCatch.is_mega ? 'Méga • ' : ''}Capturé le ${new Date(pokemonCatch.caught_at).toLocaleDateString('fr-FR')}\n\n` +
+            `${targetUser}, pour accepter, utilisez:\n\`$trade accept <votre_slot>\``
+        )
+        .setImage('attachment://trade_offer.png')
+        .setColor(0x2196F3)
+        .setFooter({ text: 'Cette offre expire dans 5 minutes' });
+    
+    await message.reply({ embeds: [embed], files: [attachment] });
+    
+    // Set timeout to expire trade
+    setTimeout(() => {
+        if (activeTrades.has(tradeId) && activeTrades.get(tradeId).status === 'pending') {
+            activeTrades.delete(tradeId);
+        }
+    }, 300000);
+}
+
+/**
+ * Handle trade confirmation button clicks
+ */
+export async function handleTradeConfirmation(interaction) {
+    const customId = interaction.customId;
+    
+    if (customId.startsWith('trade_cancel_')) {
+        const tradeId = customId.replace('trade_cancel_', '');
+        const trade = activeTrades.get(tradeId);
+        
+        if (!trade) {
+            return interaction.reply({ content: '❌ Cet échange a expiré.', ephemeral: true });
+        }
+        
+        if (interaction.user.id !== trade.user1.id && interaction.user.id !== trade.user2?.id) {
+            return interaction.reply({ content: '❌ Vous ne faites pas partie de cet échange.', ephemeral: true });
+        }
+        
+        activeTrades.delete(tradeId);
+        
+        await interaction.update({
+            embeds: [new EmbedBuilder()
+                .setTitle('❌ Échange annulé')
+                .setDescription(`L'échange a été annulé par ${interaction.user.username}.`)
+                .setColor(0xF44336)
+            ],
+            files: [],
+            components: []
+        });
+        return;
+    }
+    
+    if (customId.startsWith('trade_confirm_')) {
+        const parts = customId.split('_');
+        const tradeId = parts[2] + '_' + parts[3] + '_' + parts[4];
+        const confirmUserId = parts[5];
+        
+        const trade = activeTrades.get(tradeId);
+        
+        if (!trade) {
+            return interaction.reply({ content: '❌ Cet échange a expiré.', ephemeral: true });
+        }
+        
+        if (interaction.user.id !== confirmUserId) {
+            return interaction.reply({ content: '❌ Ce n\'est pas votre bouton de confirmation.', ephemeral: true });
+        }
+        
+        // Mark user as confirmed
+        if (interaction.user.id === trade.user1.id) {
+            trade.user1.confirmed = true;
+        } else if (interaction.user.id === trade.user2.id) {
+            trade.user2.confirmed = true;
+        }
+        
+        // Check if both confirmed
+        if (trade.user1.confirmed && trade.user2.confirmed) {
+            trade.status = 'executing';
+            
+            // Show animation
+            await interaction.update({
+                embeds: [new EmbedBuilder()
+                    .setTitle('🔄 Échange en cours...')
+                    .setDescription('Transfert des Pokémon...')
+                    .setColor(0x9C27B0)
+                ],
+                components: []
+            });
+            
+            // Animate trade (3 steps)
+            for (let step = 1; step <= 3; step++) {
+                const animImage = await generateTradeAnimationImage(step);
+                const attachment = new AttachmentBuilder(animImage, { name: `trade_anim_${step}.png` });
+                
+                await interaction.editReply({
+                    embeds: [new EmbedBuilder()
+                        .setTitle('🔄 Échange en cours...')
+                        .setImage(`attachment://trade_anim_${step}.png`)
+                        .setColor(0x9C27B0)
+                    ],
+                    files: [attachment]
+                });
+                
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            
+            // Execute trade in database
+            const success = await db.tradePokemon(
+                { catchId: trade.user1.catch.id, userId: trade.user1.id, guildId: trade.guildId },
+                { catchId: trade.user2.catch.id, userId: trade.user2.id, guildId: trade.guildId }
+            );
+            
+            if (success) {
+                trade.status = 'completed';
+                
+                // Generate success image
+                const completeImage = await generateTradeCompleteImage(
+                    {
+                        pokemon: trade.user1.pokemon,
+                        species: trade.user1.species,
+                        isShiny: trade.user1.catch.is_shiny,
+                        ownerName: trade.user1.name
+                    },
+                    {
+                        pokemon: trade.user2.pokemon,
+                        species: trade.user2.species,
+                        isShiny: trade.user2.catch.is_shiny,
+                        ownerName: trade.user2.name
+                    }
+                );
+                
+                const attachment = new AttachmentBuilder(completeImage, { name: 'trade_complete.png' });
+                
+                const name1 = getFrenchName(trade.user1.species, trade.user1.pokemon.name);
+                const name2 = getFrenchName(trade.user2.species, trade.user2.pokemon.name);
+                
+                await interaction.editReply({
+                    embeds: [new EmbedBuilder()
+                        .setTitle('✅ Échange réussi !')
+                        .setDescription(
+                            `**${trade.user1.name}** a reçu **${name2}**${trade.user2.catch.is_shiny ? ' ✨' : ''}\n` +
+                            `**${trade.user2.name}** a reçu **${name1}**${trade.user1.catch.is_shiny ? ' ✨' : ''}`
+                        )
+                        .setImage('attachment://trade_complete.png')
+                        .setColor(0x4CAF50)
+                    ],
+                    files: [attachment]
+                });
+            } else {
+                await interaction.editReply({
+                    embeds: [new EmbedBuilder()
+                        .setTitle('❌ Erreur')
+                        .setDescription('Une erreur est survenue lors de l\'échange. Les Pokémon n\'ont pas été échangés.')
+                        .setColor(0xF44336)
+                    ],
+                    files: []
+                });
+            }
+            
+            activeTrades.delete(tradeId);
+        } else {
+            // Update button to show confirmation
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`trade_confirm_${tradeId}_${trade.user1.id}`)
+                    .setLabel(`${trade.user1.name} ${trade.user1.confirmed ? '✓' : 'confirme'}`)
+                    .setStyle(trade.user1.confirmed ? ButtonStyle.Secondary : ButtonStyle.Success)
+                    .setDisabled(trade.user1.confirmed),
+                new ButtonBuilder()
+                    .setCustomId(`trade_confirm_${tradeId}_${trade.user2.id}`)
+                    .setLabel(`${trade.user2.name} ${trade.user2.confirmed ? '✓' : 'confirme'}`)
+                    .setStyle(trade.user2.confirmed ? ButtonStyle.Secondary : ButtonStyle.Success)
+                    .setDisabled(trade.user2.confirmed),
+                new ButtonBuilder()
+                    .setCustomId(`trade_cancel_${tradeId}`)
+                    .setLabel('Annuler')
+                    .setStyle(ButtonStyle.Danger)
+            );
+            
+            await interaction.update({ components: [row] });
+        }
+    }
+}

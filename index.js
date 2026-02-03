@@ -237,6 +237,11 @@ client.on('messageCreate', async (message) => {
             case 'evoluer':
                 await pokemonCommands.evolveCommand(message, args);
                 break;
+            case 'trade':
+            case 'echange':
+            case 'échanger':
+                await pokemonCommands.tradeCommand(message, args);
+                break;
             case 'megashop':
             case 'megaboutique':
             case 'pierres':
@@ -404,6 +409,19 @@ client.on('interactionCreate', async (interaction) => {
             await pokemonCommands.handleQTEInteraction(interaction);
         } catch (error) {
             console.error('Error handling QTE interaction:', error);
+            await interaction.reply({ 
+                content: '❌ Une erreur est survenue.', 
+                ephemeral: true 
+            }).catch(() => {});
+        }
+    }
+    
+    // Handle Pokemon trade buttons
+    if (interaction.customId.startsWith('trade_')) {
+        try {
+            await pokemonCommands.handleTradeConfirmation(interaction);
+        } catch (error) {
+            console.error('Error handling trade interaction:', error);
             await interaction.reply({ 
                 content: '❌ Une erreur est survenue.', 
                 ephemeral: true 
