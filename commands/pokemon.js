@@ -3394,3 +3394,139 @@ export async function handleTradeConfirmation(interaction) {
         }
     }
 }
+
+/**
+ * Test trade command - Preview trade visuals with random Pokemon
+ * Usage: $testtrade
+ */
+export async function testTradeCommand(message) {
+    const loadingMsg = await message.reply('🔄 Génération de la démo d\'échange...');
+    
+    try {
+        // Pick 2 random Pokemon
+        const id1 = Math.floor(Math.random() * MAX_POKEMON_ID) + 1;
+        let id2 = Math.floor(Math.random() * MAX_POKEMON_ID) + 1;
+        while (id2 === id1) {
+            id2 = Math.floor(Math.random() * MAX_POKEMON_ID) + 1;
+        }
+        
+        // Randomly make one shiny for demo
+        const isShiny1 = Math.random() < 0.3;
+        const isShiny2 = Math.random() < 0.3;
+        
+        // Fetch Pokemon data
+        const [pokemon1, pokemon2] = await Promise.all([
+            fetchPokemon(id1),
+            fetchPokemon(id2)
+        ]);
+        
+        const [species1, species2] = await Promise.all([
+            fetchSpecies(id1),
+            fetchSpecies(id2)
+        ]);
+        
+        if (!pokemon1 || !pokemon2) {
+            return loadingMsg.edit('❌ Erreur lors du chargement des Pokémon.');
+        }
+        
+        const name1 = getFrenchName(species1, pokemon1.name);
+        const name2 = getFrenchName(species2, pokemon2.name);
+        
+        // Step 1: Trade Offer
+        await loadingMsg.edit('📍 **Étape 1/4:** Offre d\'échange...');
+        const offerImage = await generateTradeOfferImage(pokemon1, species1, isShiny1);
+        const offerAttachment = new AttachmentBuilder(offerImage, { name: 'trade_offer.png' });
+        
+        const offerEmbed = new EmbedBuilder()
+            .setTitle('🔄 Démo - Offre d\'échange')
+            .setDescription(
+                `**Joueur A** propose **${name1}**${isShiny1 ? ' ✨' : ''}\n` +
+                `#${id1} • ${isShiny1 ? 'Shiny !' : 'Normal'}\n\n` +
+                `*Cette image apparaît quand quelqu'un propose un échange*`
+            )
+            .setImage('attachment://trade_offer.png')
+            .setColor(0x2196F3)
+            .setFooter({ text: 'Démo - Aucun échange réel' });
+        
+        await message.channel.send({ embeds: [offerEmbed], files: [offerAttachment] });
+        await new Promise(r => setTimeout(r, 1500));
+        
+        // Step 2: Confirmation screen
+        await loadingMsg.edit('📍 **Étape 2/4:** Écran de confirmation...');
+        const confirmImage = await generateTradeConfirmImage(
+            { pokemon: pokemon1, species: species1, isShiny: isShiny1, ownerName: 'Joueur A' },
+            { pokemon: pokemon2, species: species2, isShiny: isShiny2, ownerName: 'Joueur B' }
+        );
+        const confirmAttachment = new AttachmentBuilder(confirmImage, { name: 'trade_confirm.png' });
+        
+        const confirmEmbed = new EmbedBuilder()
+            .setTitle('🔄 Démo - Confirmation')
+            .setDescription(
+                `**Joueur A** échange **${name1}**${isShiny1 ? ' ✨' : ''}\n` +
+                `**Joueur B** échange **${name2}**${isShiny2 ? ' ✨' : ''}\n\n` +
+                `*Les deux joueurs doivent confirmer avec les boutons*`
+            )
+            .setImage('attachment://trade_confirm.png')
+            .setColor(0x9C27B0)
+            .setFooter({ text: 'Démo - Aucun échange réel' });
+        
+        await message.channel.send({ embeds: [confirmEmbed], files: [confirmAttachment] });
+        await new Promise(r => setTimeout(r, 1500));
+        
+        // Step 3: Animation (3 frames)
+        await loadingMsg.edit('📍 **Étape 3/4:** Animation de transfert...');
+        
+        for (let step = 1; step <= 3; step++) {
+            const animImage = await generateTradeAnimationImage(step);
+            const animAttachment = new AttachmentBuilder(animImage, { name: `trade_anim_${step}.png` });
+            
+            const animEmbed = new EmbedBuilder()
+                .setTitle(`🔄 Démo - Animation (${step}/3)`)
+                .setDescription(
+                    step === 1 ? '*Les Pokeballs commencent le transfert...*' :
+                    step === 2 ? '*Transfert en cours...*' :
+                    '*Échange terminé !*'
+                )
+                .setImage(`attachment://trade_anim_${step}.png`)
+                .setColor(0x9C27B0)
+                .setFooter({ text: 'Démo - Aucun échange réel' });
+            
+            await message.channel.send({ embeds: [animEmbed], files: [animAttachment] });
+            await new Promise(r => setTimeout(r, 1000));
+        }
+        
+        // Step 4: Complete
+        await loadingMsg.edit('📍 **Étape 4/4:** Échange réussi !');
+        const completeImage = await generateTradeCompleteImage(
+            { pokemon: pokemon1, species: species1, isShiny: isShiny1, ownerName: 'Joueur A' },
+            { pokemon: pokemon2, species: species2, isShiny: isShiny2, ownerName: 'Joueur B' }
+        );
+        const completeAttachment = new AttachmentBuilder(completeImage, { name: 'trade_complete.png' });
+        
+        const completeEmbed = new EmbedBuilder()
+            .setTitle('✅ Démo - Échange réussi !')
+            .setDescription(
+                `**Joueur A** a reçu **${name2}**${isShiny2 ? ' ✨' : ''}\n` +
+                `**Joueur B** a reçu **${name1}**${isShiny1 ? ' ✨' : ''}\n\n` +
+                `*C'est l'écran final après un échange réussi*`
+            )
+            .setImage('attachment://trade_complete.png')
+            .setColor(0x4CAF50)
+            .setFooter({ text: 'Démo terminée - Aucun échange réel effectué' });
+        
+        await message.channel.send({ embeds: [completeEmbed], files: [completeAttachment] });
+        
+        // Summary
+        await loadingMsg.edit(
+            '✅ **Démo d\'échange terminée !**\n\n' +
+            '**Commandes réelles:**\n' +
+            '• `$trade @user <slot>` - Proposer un échange\n' +
+            '• `$trade accept <slot>` - Accepter\n' +
+            '• `$trade cancel` - Annuler'
+        );
+        
+    } catch (error) {
+        console.error('Error in test trade:', error);
+        await loadingMsg.edit('❌ Erreur lors de la génération de la démo.');
+    }
+}

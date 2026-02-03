@@ -242,6 +242,10 @@ client.on('messageCreate', async (message) => {
             case 'échanger':
                 await pokemonCommands.tradeCommand(message, args);
                 break;
+            case 'testtrade':
+            case 'demotrade':
+                await pokemonCommands.testTradeCommand(message);
+                break;
             case 'megashop':
             case 'megaboutique':
             case 'pierres':
