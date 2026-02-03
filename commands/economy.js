@@ -1878,16 +1878,23 @@ const HELP_CATEGORIES = {
             '⚡ Les légendaires/fabuleux nécessitent un QTE rapide !',
             '',
             '**Collection:**',
-            '`$pokedex [page]` ou `$dex` - Voir votre Pokédex',
-            '`$pc [page]` ou `$box` - Voir tous vos Pokémon',
+            '`$pokedex [page]` ou `$dex` - Voir votre Pokédex complet',
+            '`$dex legendary/mythical/starter/pseudo/shiny` - Filtrer le Pokédex',
+            '`$pc [page]` ou `$box` - Voir tous vos Pokémon capturés',
+            '',
+            '**Évolution:**',
+            '`$evolve <n° Pokédex>` - Faire évoluer un Pokémon',
+            '`$evolve <n°> mega [pierre]` - Méga-évolution',
+            '• Coûts: 3k/10k/20k (normal) ou 10k/20k/50k (spécial)',
+            '',
+            '**Méga-Pierres:**',
+            '`$megashop` - Voir la boutique des Méga-Pierres',
+            '`$megashop buy <pierre>` - Acheter une Méga-Pierre',
             '',
             '**Informations:**',
             '`$pokemon <nom/numéro>` - Infos sur un Pokémon',
-            '• Recherche en français ou anglais',
-            '• Exemple: `$pokemon dracaufeu` ou `$pokemon 6`',
-            '',
-            '**Test (dev):**',
-            '`$testlegendary` - Tester le système QTE'
+            '• Recherche en français ou anglais (1025 Pokémon)',
+            '• Exemple: `$pokemon dracaufeu` ou `$pokemon 6`'
         ]
     },
     admin: {
@@ -1898,7 +1905,9 @@ const HELP_CATEGORIES = {
         commands: [
             '`$setbalance @user <montant>` - Définir le solde',
             '`$addmoney @user <montant>` - Ajouter des coins',
-            '`$removemoney @user <montant>` - Retirer des coins'
+            '`$removemoney @user <montant>` - Retirer des coins',
+            '`$buildpokemoncache` - Reconstruire le cache des noms FR',
+            '`$buildcategoriescache` - Reconstruire le cache des catégories'
         ]
     }
 };

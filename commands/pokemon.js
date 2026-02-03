@@ -3,6 +3,8 @@ import * as db from '../database.js';
 import { createCanvas, loadImage, registerFont } from 'canvas';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { readFile, writeFile } from 'fs/promises';
+import { existsSync } from 'fs';
 
 // Register Pokemon font
 const __filename = fileURLToPath(import.meta.url);
@@ -17,113 +19,141 @@ try {
 // PokeAPI base URL
 const POKEAPI_BASE = 'https://pokeapi.co/api/v2';
 
+// Path to cache files
+const FRENCH_NAMES_CACHE_PATH = join(__dirname, '../data/pokemon-names-fr.json');
+const CATEGORIES_CACHE_PATH = join(__dirname, '../data/pokemon-categories.json');
+
 // Cache for Pokemon data (to reduce API calls)
 const pokemonCache = new Map();
 const speciesCache = new Map();
-// Cache for French names -> Pokemon ID mapping
+// Cache for French names -> Pokemon ID mapping (loaded from file or built from API)
 const frenchNameToIdCache = new Map();
+// Reverse cache: Pokemon ID -> French name
+const idToFrenchNameCache = new Map();
+// Cache loading state
+let frenchNamesCacheLoaded = false;
+let frenchNamesCacheLoading = false;
 
-// Pokemon rarity tiers (based on Pokemon ID ranges and specific Pokemon)
+// Pokemon categories cache (loaded from file)
+let categoriesCache = null;
+let categoriesCacheLoaded = false;
+
+// Default fallback categories (used if cache fails to load)
+const DEFAULT_CATEGORIES = {
+    legendary: [144, 145, 146, 150, 243, 244, 245, 249, 250, 377, 378, 379, 380, 381, 382, 383, 384, 480, 481, 482, 483, 484, 485, 486, 487, 488, 638, 639, 640, 641, 642, 643, 644, 645, 646, 716, 717, 718, 772, 773, 785, 786, 787, 788, 789, 790, 791, 792, 800, 888, 889, 890, 891, 892, 894, 895, 896, 897, 898, 905, 1001, 1002, 1003, 1004, 1007, 1008, 1014, 1015, 1016, 1017, 1024],
+    mythical: [151, 251, 385, 386, 489, 490, 491, 492, 493, 494, 647, 648, 649, 719, 720, 721, 801, 802, 807, 808, 809, 893, 1025],
+    starter: [1, 2, 3, 4, 5, 6, 7, 8, 9, 152, 153, 154, 155, 156, 157, 158, 159, 160, 252, 253, 254, 255, 256, 257, 258, 259, 260, 387, 388, 389, 390, 391, 392, 393, 394, 395, 495, 496, 497, 498, 499, 500, 501, 502, 503, 650, 651, 652, 653, 654, 655, 656, 657, 658, 722, 723, 724, 725, 726, 727, 728, 729, 730, 810, 811, 812, 813, 814, 815, 816, 817, 818, 906, 907, 908, 909, 910, 911, 912, 913, 914],
+    pseudo: [149, 248, 373, 376, 445, 635, 706, 784, 887, 998, 1018]
+};
+
+/**
+ * Load Pokemon categories cache from file
+ */
+async function loadCategoriesCache() {
+    if (categoriesCacheLoaded) return;
+    
+    try {
+        if (existsSync(CATEGORIES_CACHE_PATH)) {
+            const data = await readFile(CATEGORIES_CACHE_PATH, 'utf-8');
+            categoriesCache = JSON.parse(data);
+            categoriesCacheLoaded = true;
+            
+            const counts = Object.entries(categoriesCache.categories)
+                .map(([k, v]) => `${k}: ${v.ids.length}`)
+                .join(', ');
+            console.log(`✅ Cache des catégories Pokémon chargé (${counts})`);
+        } else {
+            console.log('📋 Cache des catégories non trouvé, utilisation des valeurs par défaut');
+            categoriesCache = null;
+        }
+    } catch (error) {
+        console.error('⚠️ Erreur lors du chargement du cache des catégories:', error.message);
+        categoriesCache = null;
+    }
+}
+
+/**
+ * Get Pokemon IDs for a category
+ */
+function getCategoryIds(category) {
+    if (categoriesCache?.categories?.[category]?.ids) {
+        return categoriesCache.categories[category].ids;
+    }
+    return DEFAULT_CATEGORIES[category] || [];
+}
+
+// Load categories cache at startup
+loadCategoriesCache();
+
+// ============================================================================
+// RARITY SYSTEM - Probability Distribution
+// ============================================================================
+// Total must equal 100%
+//
+// Tier           Chance    Roll Range    Description
+// ─────────────────────────────────────────────────────────────────────────────
+// Legendary       1%       [0, 1)        Legendary Pokemon (from API)
+// Mythical        3%       [1, 4)        Mythical/Fabulous Pokemon (from API)
+// Rare            5%       [4, 9)        Starters + Pseudo-legendaries
+// Uncommon       35%       [9, 44)       Evolved Pokemon (has pre-evolution)
+// Common         56%       [44, 100)     Basic Pokemon (no pre-evolution)
+// ─────────────────────────────────────────────────────────────────────────────
+// Total:        100%
+// ============================================================================
+
+const RARITY_CHANCES = Object.freeze({
+    legendary: 1,
+    mythical: 3,
+    rare: 5,        // starters + pseudo-legendaries
+    uncommon: 35,   // evolved Pokemon (rarer than basic)
+    common: 56      // basic Pokemon (most common)
+});
+
+// Validate percentages sum to 100 at startup
+const TOTAL_CHANCE = Object.values(RARITY_CHANCES).reduce((sum, chance) => sum + chance, 0);
+if (TOTAL_CHANCE !== 100) {
+    throw new Error(`RARITY_CHANCES total is ${TOTAL_CHANCE}%, must be exactly 100%!`);
+}
+
+// Pre-compute cumulative thresholds for efficient lookup
+const RARITY_THRESHOLDS = Object.freeze({
+    legendary: RARITY_CHANCES.legendary,                                          // 1
+    mythical: RARITY_CHANCES.legendary + RARITY_CHANCES.mythical,                 // 4
+    rare: RARITY_CHANCES.legendary + RARITY_CHANCES.mythical + RARITY_CHANCES.rare, // 9
+    uncommon: RARITY_CHANCES.legendary + RARITY_CHANCES.mythical + RARITY_CHANCES.rare + RARITY_CHANCES.uncommon, // 44
+    common: 100                                                                    // 100
+});
+
+// Pokemon rarity tiers (dynamically uses cache)
 const RARITY_TIERS = {
     legendary: {
-        // Complete list of all legendary Pokemon (Gen 1-9)
-        ids: [
-            // Gen 1: Articuno, Zapdos, Moltres, Mewtwo
-            144, 145, 146, 150,
-            // Gen 2: Raikou, Entei, Suicune, Lugia, Ho-Oh
-            243, 244, 245, 249, 250,
-            // Gen 3: Regirock, Regice, Registeel, Latias, Latios, Kyogre, Groudon, Rayquaza
-            377, 378, 379, 380, 381, 382, 383, 384,
-            // Gen 4: Uxie, Mesprit, Azelf, Dialga, Palkia, Heatran, Regigigas, Giratina, Cresselia
-            480, 481, 482, 483, 484, 485, 486, 487, 488,
-            // Gen 5: Cobalion, Terrakion, Virizion, Tornadus, Thundurus, Reshiram, Zekrom, Landorus, Kyurem
-            638, 639, 640, 641, 642, 643, 644, 645, 646,
-            // Gen 6: Xerneas, Yveltal, Zygarde
-            716, 717, 718,
-            // Gen 7: Type:Null, Silvally, Tapu Koko/Lele/Bulu/Fini, Cosmog, Cosmoem, Solgaleo, Lunala, Necrozma
-            772, 773, 785, 786, 787, 788, 789, 790, 791, 792, 800,
-            // Gen 8: Zacian, Zamazenta, Eternatus, Kubfu, Urshifu, Regieleki, Regidrago, Glastrier, Spectrier, Calyrex
-            888, 889, 890, 891, 892, 894, 895, 896, 897, 898,
-            // Gen 9: Wo-Chien, Chien-Pao, Ting-Lu, Chi-Yu, Koraidon, Miraidon, Ogerpon, Terapagos
-            1001, 1002, 1003, 1004, 1007, 1008, 1017, 1024
-        ],
-        chance: 1, // 1% chance
+        get ids() { return getCategoryIds('legendary'); },
+        chance: RARITY_CHANCES.legendary,
         color: 0xFFD700,
         emoji: '🌟'
     },
     mythical: {
-        // Complete list of all mythical/fabulous Pokemon (Gen 1-9)
-        ids: [
-            // Gen 1: Mew
-            151,
-            // Gen 2: Celebi
-            251,
-            // Gen 3: Jirachi, Deoxys
-            385, 386,
-            // Gen 4: Phione, Manaphy, Darkrai, Shaymin, Arceus
-            489, 490, 491, 492, 493,
-            // Gen 5: Victini, Keldeo, Meloetta, Genesect
-            494, 647, 648, 649,
-            // Gen 6: Diancie, Hoopa, Volcanion
-            719, 720, 721,
-            // Gen 7: Magearna, Marshadow, Zeraora, Meltan, Melmetal
-            801, 802, 807, 808, 809,
-            // Gen 8: Zarude
-            893,
-            // Gen 9: Pecharunt
-            1025
-        ],
-        chance: 3, // 3% chance
+        get ids() { return getCategoryIds('mythical'); },
+        chance: RARITY_CHANCES.mythical,
         color: 0xFF00FF,
         emoji: '✨'
     },
     rare: {
-        // Pseudo-legendaries (600 base stats) - very powerful Pokemon
-        ids: [
-            // Gen 1: Dragonite
-            149,
-            // Gen 2: Tyranitar
-            248,
-            // Gen 3: Salamence, Metagross
-            373, 376,
-            // Gen 4: Garchomp
-            445,
-            // Gen 5: Hydreigon
-            635,
-            // Gen 6: Goodra
-            706,
-            // Gen 7: Kommo-o
-            784,
-            // Gen 8: Dragapult
-            887,
-            // Gen 9: Baxcalibur
-            998
-        ],
-        // All starters from all generations (Gen 1-9)
-        idRanges: [
-            [1, 9],     // Gen 1: Bulbasaur -> Blastoise
-            [152, 160], // Gen 2: Chikorita -> Feraligatr
-            [252, 260], // Gen 3: Treecko -> Swampert
-            [387, 395], // Gen 4: Turtwig -> Empoleon
-            [495, 503], // Gen 5: Snivy -> Samurott
-            [650, 658], // Gen 6: Chespin -> Greninja
-            [722, 730], // Gen 7: Rowlet -> Primarina
-            [810, 818], // Gen 8: Grookey -> Inteleon
-            [906, 914]  // Gen 9: Sprigatito -> Quaquaval
-        ],
-        chance: 5, // 5% chance
+        // Combined: pseudo-legendaries + starters
+        get ids() { return [...getCategoryIds('pseudo'), ...getCategoryIds('starter')]; },
+        chance: RARITY_CHANCES.rare,
         color: 0x9B59B6,
         emoji: '💎'
     },
     uncommon: {
-        // Pokemon that evolve or have decent stats (assigned dynamically)
-        chance: 35, // 35% chance
+        // Evolved Pokemon (determined dynamically)
+        chance: RARITY_CHANCES.uncommon,
         color: 0x3498DB,
         emoji: '🔵'
     },
     common: {
-        // Basic Pokemon, first stages (assigned dynamically)
-        chance: 56, // 56% chance (100 - 1 - 3 - 5 - 35 = 56)
+        // Basic Pokemon, first stages (determined dynamically)
+        chance: RARITY_CHANCES.common,
         color: 0x2ECC71,
         emoji: '🟢'
     }
@@ -138,14 +168,78 @@ const CATCH_COOLDOWN = 15;
 // Max Pokemon ID to catch (Gen 1-9 = 1025)
 const MAX_POKEMON_ID = 1025;
 
-// Pseudo-legendaries list (for QTE check - same as rare.ids)
-const PSEUDO_LEGENDARIES = [149, 248, 373, 376, 445, 635, 706, 784, 887, 998];
+// Pseudo-legendaries list (dynamically from cache)
+function getPseudoLegendaries() {
+    return getCategoryIds('pseudo');
+}
+
+// Evolution costs (coins)
+const EVOLVE_COST = {
+    normal: { toSecond: 3000, toThird: 10000, mega: 20000 },
+    special: { toSecond: 10000, toThird: 20000, mega: 50000 } // starter, pseudo, legendary, mythical
+};
+
+// Mega stone shop: stoneId -> { frenchName, baseSpeciesId, priceTier }
+// priceTier: 1=weak 5000, 2=medium 15000, 3=strong 30000, 4=legendary 50000
+const MEGA_STONE_PRICES = { 1: 5000, 2: 15000, 3: 30000, 4: 50000 };
+const MEGA_STONES = [
+    { stoneId: 'venusaurite', frenchName: 'Floramite', baseSpeciesId: 3, priceTier: 1 },
+    { stoneId: 'charizardite-x', frenchName: 'Dracaufeunite X', baseSpeciesId: 6, priceTier: 3 },
+    { stoneId: 'charizardite-y', frenchName: 'Dracaufeunite Y', baseSpeciesId: 6, priceTier: 3 },
+    { stoneId: 'blastoisinite', frenchName: 'Tortankite', baseSpeciesId: 9, priceTier: 1 },
+    { stoneId: 'beedrillite', frenchName: 'Dardargnite', baseSpeciesId: 15, priceTier: 1 },
+    { stoneId: 'pidgeotite', frenchName: 'Roucarnite', baseSpeciesId: 18, priceTier: 1 },
+    { stoneId: 'alakazite', frenchName: 'Alakazamite', baseSpeciesId: 65, priceTier: 2 },
+    { stoneId: 'slowbronite', frenchName: 'Flagadossite', baseSpeciesId: 80, priceTier: 2 },
+    { stoneId: 'gengarite', frenchName: 'Ectoplasmite', baseSpeciesId: 94, priceTier: 3 },
+    { stoneId: 'kangaskhanite', frenchName: 'Kangoureskite', baseSpeciesId: 115, priceTier: 2 },
+    { stoneId: 'pinsirite', frenchName: 'Scarabrutite', baseSpeciesId: 127, priceTier: 2 },
+    { stoneId: 'gyaradosite', frenchName: 'Léviatorite', baseSpeciesId: 130, priceTier: 2 },
+    { stoneId: 'aerodactylite', frenchName: 'Ptéraite', baseSpeciesId: 142, priceTier: 2 },
+    { stoneId: 'mewtwonite-x', frenchName: 'Mewtwoite X', baseSpeciesId: 150, priceTier: 4 },
+    { stoneId: 'mewtwonite-y', frenchName: 'Mewtwoite Y', baseSpeciesId: 150, priceTier: 4 },
+    { stoneId: 'ampharosite', frenchName: 'Pharampite', baseSpeciesId: 181, priceTier: 2 },
+    { stoneId: 'steelixite', frenchName: 'Steelixite', baseSpeciesId: 208, priceTier: 2 },
+    { stoneId: 'scizorite', frenchName: 'Cizayoxite', baseSpeciesId: 212, priceTier: 3 },
+    { stoneId: 'heracronite', frenchName: 'Scarhinoite', baseSpeciesId: 214, priceTier: 2 },
+    { stoneId: 'houndoominite', frenchName: 'Démolossite', baseSpeciesId: 229, priceTier: 2 },
+    { stoneId: 'tyranitarite', frenchName: 'Tyranocivite', baseSpeciesId: 248, priceTier: 3 },
+    { stoneId: 'blazikenite', frenchName: 'Braségalite', baseSpeciesId: 257, priceTier: 3 },
+    { stoneId: 'gardevoirite', frenchName: 'Gardevoirite', baseSpeciesId: 282, priceTier: 3 },
+    { stoneId: 'mawilite', frenchName: 'Mysdibulite', baseSpeciesId: 303, priceTier: 2 },
+    { stoneId: 'aggronite', frenchName: 'Galekingite', baseSpeciesId: 306, priceTier: 2 },
+    { stoneId: 'medichamite', frenchName: 'Charminite', baseSpeciesId: 308, priceTier: 2 },
+    { stoneId: 'manectrite', frenchName: 'Élecsprintite', baseSpeciesId: 310, priceTier: 2 },
+    { stoneId: 'banettite', frenchName: 'Branettite', baseSpeciesId: 354, priceTier: 2 },
+    { stoneId: 'absolite', frenchName: 'Absolite', baseSpeciesId: 359, priceTier: 2 },
+    { stoneId: 'latiasite', frenchName: 'Latiasite', baseSpeciesId: 380, priceTier: 4 },
+    { stoneId: 'latiosite', frenchName: 'Latiosite', baseSpeciesId: 381, priceTier: 4 },
+    { stoneId: 'garchompite', frenchName: 'Carchacrokite', baseSpeciesId: 445, priceTier: 3 },
+    { stoneId: 'lucarionite', frenchName: 'Lucarite', baseSpeciesId: 448, priceTier: 3 },
+    { stoneId: 'abomasite', frenchName: 'Blizzarite', baseSpeciesId: 460, priceTier: 2 },
+    { stoneId: 'metagrossite', frenchName: 'Métalossite', baseSpeciesId: 376, priceTier: 3 },
+    { stoneId: 'salamencite', frenchName: 'Drattakite', baseSpeciesId: 373, priceTier: 3 },
+    { stoneId: 'lopunnite', frenchName: 'Lockpinite', baseSpeciesId: 428, priceTier: 2 },
+    { stoneId: 'galladite', frenchName: 'Gallamite', baseSpeciesId: 475, priceTier: 3 },
+    { stoneId: 'audinite', frenchName: 'Nanméouite', baseSpeciesId: 531, priceTier: 1 },
+    { stoneId: 'diancite', frenchName: 'Diancite', baseSpeciesId: 719, priceTier: 4 },
+    { stoneId: 'cameruptite', frenchName: 'Cameruptite', baseSpeciesId: 323, priceTier: 2 },
+    { stoneId: 'sharpedonite', frenchName: 'Sharpedite', baseSpeciesId: 319, priceTier: 2 },
+    { stoneId: 'sceptilite', frenchName: 'Jungkoite', baseSpeciesId: 254, priceTier: 3 },
+    { stoneId: 'swampertite', frenchName: 'Laggronite', baseSpeciesId: 260, priceTier: 3 },
+    { stoneId: 'sableyeite', frenchName: 'Ténéfixite', baseSpeciesId: 302, priceTier: 2 },
+    { stoneId: 'altarianite', frenchName: 'Altarite', baseSpeciesId: 334, priceTier: 2 },
+    { stoneId: 'glalitite', frenchName: 'Oniglalite', baseSpeciesId: 362, priceTier: 2 },
+];
 
 // QTE settings for legendary catches
 const QTE_TIME_LIMIT = 3000; // 3 seconds to react
 
 // Active QTE sessions
 const activeQTEs = new Map();
+
+// Evolution chain cache
+const evolutionChainCache = new Map();
 
 /**
  * Fetch Pokemon data from PokeAPI with caching
@@ -174,6 +268,283 @@ async function fetchPokemon(idOrName) {
 }
 
 /**
+ * Fetch evolution chain by chain URL (from species)
+ * @param {string} chainUrl - e.g. https://pokeapi.co/api/v2/evolution-chain/2/
+ * @returns {Promise<Object|null>} Chain object or null
+ */
+async function fetchEvolutionChain(chainUrl) {
+    if (!chainUrl) return null;
+    const id = chainUrl.split('/').filter(Boolean).pop();
+    if (evolutionChainCache.has(id)) return evolutionChainCache.get(id);
+    try {
+        const response = await fetch(`${POKEAPI_BASE}/evolution-chain/${id}`);
+        if (!response.ok) return null;
+        const data = await response.json();
+        evolutionChainCache.set(id, data);
+        return data;
+    } catch (error) {
+        console.error('Error fetching evolution chain:', error);
+        return null;
+    }
+}
+
+/**
+ * Find the node in the evolution chain that matches the given species ID
+ * @param {Object} node - Chain node { species: { url }, evolves_to: [] }
+ * @param {number} targetId - Species ID to find
+ * @param {number} depth - Current depth (stage - 1)
+ * @returns {{ node: Object, stage: number } | null}
+ */
+function findNodeInChain(node, targetId, depth = 0) {
+    if (!node?.species?.url) return null;
+    const speciesId = parseInt(node.species.url.split('/').filter(Boolean).pop(), 10);
+    if (speciesId === targetId) return { node, stage: depth + 1 };
+    for (const child of (node.evolves_to || [])) {
+        const result = findNodeInChain(child, targetId, depth + 1);
+        if (result) return result;
+    }
+    return null;
+}
+
+/**
+ * Get all possible next evolutions from a chain node
+ * @param {Object} node - Chain node with evolves_to array
+ * @returns {number[]} Array of species IDs that this Pokemon can evolve into
+ */
+function getNextEvolutions(node) {
+    if (!node?.evolves_to?.length) return [];
+    return node.evolves_to.map(child => {
+        const id = parseInt(child.species.url.split('/').filter(Boolean).pop(), 10);
+        return isNaN(id) ? null : id;
+    }).filter(Boolean);
+}
+
+/**
+ * Check if a Pokemon is at its final evolution stage (no further evolutions)
+ * @param {Object} node - Chain node
+ * @returns {boolean}
+ */
+function isFinalStage(node) {
+    return !node?.evolves_to?.length;
+}
+
+/**
+ * Get evolution stage (1, 2, or 3), all possible next evolutions, and mega info
+ * @param {number} pokemonId - Current species id
+ * @param {Object} species - Species data (with evolution_chain)
+ * @returns {Promise<{ stage: number, nextEvolutions: number[], isFinal: boolean, canMega: boolean, megaStones: Object[] }>}
+ */
+async function getEvolutionInfo(pokemonId, species) {
+    const chainData = species?.evolution_chain?.url
+        ? await fetchEvolutionChain(species.evolution_chain.url)
+        : null;
+    
+    let stage = 1;
+    let nextEvolutions = [];
+    let isFinal = true;
+    
+    if (chainData?.chain) {
+        const found = findNodeInChain(chainData.chain, pokemonId);
+        if (found) {
+            stage = found.stage;
+            nextEvolutions = getNextEvolutions(found.node);
+            isFinal = isFinalStage(found.node);
+        }
+    }
+    
+    const megaStonesForSpecies = MEGA_STONES.filter(s => s.baseSpeciesId === pokemonId);
+    // Can mega evolve if has mega stones AND is at final stage (no normal evolutions left)
+    const canMega = megaStonesForSpecies.length > 0 && isFinal;
+    
+    return { stage, nextEvolutions, isFinal, canMega, megaStones: megaStonesForSpecies };
+}
+
+/**
+ * Check if Pokemon is special (starter, pseudo-legendary, legendary, mythical) for evolution cost
+ */
+function isSpecialPokemon(pokemonId) {
+    if (getCategoryIds('legendary').includes(pokemonId)) return true;
+    if (getCategoryIds('mythical').includes(pokemonId)) return true;
+    if (getCategoryIds('pseudo').includes(pokemonId)) return true;
+    if (getCategoryIds('starter').includes(pokemonId)) return true;
+    return false;
+}
+
+/**
+ * Coin reward for catching a Pokemon (economy farmable)
+ */
+function getCatchCoinReward(rarity) {
+    const name = rarity?.name || '';
+    if (name === 'Légendaire' || name === 'Fabuleux') return 300;
+    if (name === 'Pseudo-Légendaire' || name === 'Starter') return 150;
+    if (name === 'Peu commun') return 80;
+    return 50; // Commun
+}
+
+/**
+ * Remove accents from a string for accent-insensitive comparison
+ */
+function removeAccents(str) {
+    return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+/**
+ * Load French names cache from file
+ */
+async function loadFrenchNamesCache() {
+    if (frenchNamesCacheLoaded || frenchNamesCacheLoading) return;
+    frenchNamesCacheLoading = true;
+    
+    try {
+        if (existsSync(FRENCH_NAMES_CACHE_PATH)) {
+            const data = await readFile(FRENCH_NAMES_CACHE_PATH, 'utf-8');
+            const cache = JSON.parse(data);
+            
+            for (const [frName, id] of Object.entries(cache)) {
+                frenchNameToIdCache.set(frName.toLowerCase(), id);
+                frenchNameToIdCache.set(removeAccents(frName.toLowerCase()), id);
+                idToFrenchNameCache.set(id, frName);
+            }
+            
+            console.log(`✅ Cache des noms français chargé (${Object.keys(cache).length} Pokémon)`);
+            frenchNamesCacheLoaded = true;
+        } else {
+            console.log('📋 Cache des noms français non trouvé, il sera construit au fur et à mesure');
+        }
+    } catch (error) {
+        console.error('⚠️ Erreur lors du chargement du cache des noms français:', error.message);
+    }
+    
+    frenchNamesCacheLoading = false;
+}
+
+/**
+ * Save French names cache to file
+ */
+async function saveFrenchNamesCache() {
+    try {
+        // Create data directory if it doesn't exist
+        const dataDir = join(__dirname, '../data');
+        const { mkdir } = await import('fs/promises');
+        await mkdir(dataDir, { recursive: true });
+        
+        // Build cache object from idToFrenchNameCache
+        const cache = {};
+        for (const [id, frName] of idToFrenchNameCache.entries()) {
+            cache[frName] = id;
+        }
+        
+        await writeFile(FRENCH_NAMES_CACHE_PATH, JSON.stringify(cache, null, 2), 'utf-8');
+        console.log(`💾 Cache des noms français sauvegardé (${Object.keys(cache).length} Pokémon)`);
+    } catch (error) {
+        console.error('⚠️ Erreur lors de la sauvegarde du cache:', error.message);
+    }
+}
+
+/**
+ * Build French names cache by fetching all species from PokeAPI
+ * This is called once to populate the cache file
+ */
+export async function buildFrenchNamesCache(message) {
+    if (message) {
+        await message.reply('🔄 Construction du cache des noms français... Cela peut prendre quelques minutes.');
+    }
+    
+    const batchSize = 50;
+    let newEntries = 0;
+    
+    for (let start = 1; start <= MAX_POKEMON_ID; start += batchSize) {
+        const end = Math.min(start + batchSize - 1, MAX_POKEMON_ID);
+        const promises = [];
+        
+        for (let id = start; id <= end; id++) {
+            if (!idToFrenchNameCache.has(id)) {
+                promises.push(
+                    fetch(`${POKEAPI_BASE}/pokemon-species/${id}`)
+                        .then(res => res.ok ? res.json() : null)
+                        .then(data => {
+                            if (data) {
+                                const frName = data.names?.find(n => n.language.name === 'fr');
+                                if (frName) {
+                                    frenchNameToIdCache.set(frName.name.toLowerCase(), data.id);
+                                    frenchNameToIdCache.set(removeAccents(frName.name.toLowerCase()), data.id);
+                                    idToFrenchNameCache.set(data.id, frName.name);
+                                    newEntries++;
+                                }
+                            }
+                        })
+                        .catch(() => {})
+                );
+            }
+        }
+        
+        if (promises.length > 0) {
+            await Promise.all(promises);
+            // Small delay to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        
+        if (message && start % 200 === 1) {
+            console.log(`📊 Cache: ${start}-${end}/${MAX_POKEMON_ID}...`);
+        }
+    }
+    
+    await saveFrenchNamesCache();
+    frenchNamesCacheLoaded = true;
+    
+    if (message) {
+        await message.reply(`✅ Cache des noms français construit ! ${newEntries} nouveaux noms ajoutés.`);
+    }
+    
+    return newEntries;
+}
+
+/**
+ * Build Pokemon categories cache (legendary, mythical, starter, pseudo)
+ * Runs the external script to fetch data from PokeAPI
+ */
+export async function buildCategoriesCache(message) {
+    const { spawn } = await import('child_process');
+    
+    if (message) {
+        await message.reply('🔄 Construction du cache des catégories Pokémon... Cela peut prendre 1-2 minutes.');
+    }
+    
+    return new Promise((resolve, reject) => {
+        const scriptPath = join(__dirname, '../scripts/build-pokemon-categories-cache.js');
+        const child = spawn('node', [scriptPath], { cwd: join(__dirname, '..') });
+        
+        let output = '';
+        child.stdout.on('data', (data) => { output += data.toString(); });
+        child.stderr.on('data', (data) => { output += data.toString(); });
+        
+        child.on('close', async (code) => {
+            if (code === 0) {
+                // Reload the cache
+                categoriesCacheLoaded = false;
+                await loadCategoriesCache();
+                
+                if (message) {
+                    const counts = categoriesCache?.categories 
+                        ? Object.entries(categoriesCache.categories).map(([k, v]) => `${k}: ${v.ids.length}`).join(', ')
+                        : 'inconnu';
+                    await message.reply(`✅ Cache des catégories reconstruit ! (${counts})`);
+                }
+                resolve(true);
+            } else {
+                if (message) {
+                    await message.reply(`❌ Erreur lors de la construction du cache (code ${code})`);
+                }
+                reject(new Error(`Script exited with code ${code}`));
+            }
+        });
+    });
+}
+
+// Load cache at module initialization
+loadFrenchNamesCache();
+
+/**
  * Fetch Pokemon species data (for descriptions)
  */
 async function fetchSpecies(idOrName) {
@@ -191,10 +562,12 @@ async function fetchSpecies(idOrName) {
         speciesCache.set(key, data);
         speciesCache.set(String(data.id), data);
         
-        // Cache French name for reverse lookup
+        // Cache French name for reverse lookup (both with and without accents)
         const frName = data.names?.find(n => n.language.name === 'fr');
         if (frName) {
             frenchNameToIdCache.set(frName.name.toLowerCase(), data.id);
+            frenchNameToIdCache.set(removeAccents(frName.name.toLowerCase()), data.id);
+            idToFrenchNameCache.set(data.id, frName.name);
         }
         
         return data;
@@ -205,44 +578,64 @@ async function fetchSpecies(idOrName) {
 }
 
 /**
- * Get a random Pokemon ID based on rarity
+ * Pick a random element from an array
+ * @param {Array} arr - Array to pick from
+ * @returns {*} Random element or null if array is empty
+ */
+function randomFromArray(arr) {
+    if (!arr || arr.length === 0) return null;
+    return arr[Math.floor(Math.random() * arr.length)];
+}
+
+/**
+ * Get a random Pokemon ID based on rarity distribution.
+ * 
+ * Uses pre-computed cumulative thresholds for O(1) tier determination.
+ * Roll is in [0, 100), each tier occupies exactly its configured percentage.
+ * 
+ * Distribution:
+ *   [0, 1)   → Legendary (1%)
+ *   [1, 4)   → Mythical (3%)
+ *   [4, 9)   → Rare/Starter+Pseudo (5%)
+ *   [9, 44)  → Uncommon (35%) - falls through to random
+ *   [44, 100) → Common (56%) - falls through to random
+ * 
+ * @returns {number} Pokemon ID
  */
 function getRandomPokemonId() {
     const roll = Math.random() * 100;
-    let cumulative = 0;
     
-    // Check legendary (1%)
-    cumulative += RARITY_TIERS.legendary.chance;
-    if (roll < cumulative) {
-        const legendaries = RARITY_TIERS.legendary.ids;
-        return legendaries[Math.floor(Math.random() * legendaries.length)];
+    // Legendary: 1% chance [0, 1)
+    if (roll < RARITY_THRESHOLDS.legendary) {
+        const id = randomFromArray(getCategoryIds('legendary'));
+        if (id) return id;
     }
     
-    // Check mythical/fabulous (3%)
-    cumulative += RARITY_TIERS.mythical.chance;
-    if (roll < cumulative) {
-        const mythicals = RARITY_TIERS.mythical.ids;
-        return mythicals[Math.floor(Math.random() * mythicals.length)];
+    // Mythical: 3% chance [1, 4)
+    if (roll < RARITY_THRESHOLDS.mythical) {
+        const id = randomFromArray(getCategoryIds('mythical'));
+        if (id) return id;
     }
     
-    // Check rare - pseudo-legendaries and starters (5%)
-    cumulative += RARITY_TIERS.rare.chance;
-    if (roll < cumulative) {
-        // 30% chance for pseudo-legendary, 70% for starter
-        if (Math.random() < 0.3 && RARITY_TIERS.rare.ids.length > 0) {
-            // Pseudo-legendary
-            const pseudoLegendaries = RARITY_TIERS.rare.ids;
-            return pseudoLegendaries[Math.floor(Math.random() * pseudoLegendaries.length)];
-        } else {
-            // Starter
-            const ranges = RARITY_TIERS.rare.idRanges;
-            const range = ranges[Math.floor(Math.random() * ranges.length)];
-            return Math.floor(Math.random() * (range[1] - range[0] + 1)) + range[0];
+    // Rare (Starters + Pseudo-legendaries): 5% chance [4, 9)
+    if (roll < RARITY_THRESHOLDS.rare) {
+        const pseudoIds = getCategoryIds('pseudo');
+        const starterIds = getCategoryIds('starter');
+        
+        // Within rare tier: ~12% pseudo-legendary, ~88% starter
+        // (based on relative counts: 11 pseudo vs 81 starters)
+        const totalRare = pseudoIds.length + starterIds.length;
+        if (totalRare > 0) {
+            const pseudoChance = pseudoIds.length / totalRare;
+            if (Math.random() < pseudoChance) {
+                return randomFromArray(pseudoIds) || randomFromArray(starterIds);
+            }
+            return randomFromArray(starterIds) || randomFromArray(pseudoIds);
         }
     }
     
-    // Uncommon (35%) + Common (56%) - random from all Pokemon
-    // Rarity is determined by getRarity() based on evolution status
+    // Uncommon (35%) + Common (56%): random from all Pokemon
+    // The actual rarity label is determined by getRarity() based on evolution status
     return Math.floor(Math.random() * MAX_POKEMON_ID) + 1;
 }
 
@@ -252,23 +645,21 @@ function getRandomPokemonId() {
  * @param {object} species - Optional species data to determine if evolved
  */
 function getRarity(pokemonId, species = null) {
-    if (RARITY_TIERS.legendary.ids.includes(pokemonId)) {
+    if (getCategoryIds('legendary').includes(pokemonId)) {
         return { name: 'Légendaire', ...RARITY_TIERS.legendary };
     }
-    if (RARITY_TIERS.mythical.ids.includes(pokemonId)) {
+    if (getCategoryIds('mythical').includes(pokemonId)) {
         return { name: 'Fabuleux', ...RARITY_TIERS.mythical };
     }
     
-    // Check pseudo-legendaries (in rare.ids)
-    if (RARITY_TIERS.rare.ids.includes(pokemonId)) {
+    // Check pseudo-legendaries
+    if (getCategoryIds('pseudo').includes(pokemonId)) {
         return { name: 'Pseudo-Légendaire', ...RARITY_TIERS.rare };
     }
     
-    // Check starters (in rare.idRanges)
-    for (const range of RARITY_TIERS.rare.idRanges || []) {
-        if (pokemonId >= range[0] && pokemonId <= range[1]) {
-            return { name: 'Starter', ...RARITY_TIERS.rare };
-        }
+    // Check starters
+    if (getCategoryIds('starter').includes(pokemonId)) {
+        return { name: 'Starter', ...RARITY_TIERS.rare };
     }
     
     // If we have species data, check if it's an evolution
@@ -281,9 +672,10 @@ function getRarity(pokemonId, species = null) {
         return { name: 'Commun', ...RARITY_TIERS.common };
     }
     
-    // Fallback: random based on configured chances (35% uncommon, 56% common)
-    // Ratio: 35/(35+56) = 38.5% chance for uncommon
-    if (Math.random() < 0.385) {
+    // Fallback when no species data: use configured ratio
+    // uncommon / (uncommon + common) = probability of uncommon
+    const uncommonRatio = RARITY_CHANCES.uncommon / (RARITY_CHANCES.uncommon + RARITY_CHANCES.common);
+    if (Math.random() < uncommonRatio) {
         return { name: 'Peu commun', ...RARITY_TIERS.uncommon };
     }
     
@@ -331,148 +723,35 @@ function getFrenchDescription(species) {
 }
 
 /**
- * Get French name from species data
+ * Get French name from species data or cache
  */
 function getFrenchName(species, fallbackName) {
-    if (!species?.names) return capitalize(fallbackName);
+    // First check if we have it in the cache (by ID)
+    if (species?.id && idToFrenchNameCache.has(species.id)) {
+        return idToFrenchNameCache.get(species.id);
+    }
     
-    const frName = species.names.find(n => n.language.name === 'fr');
-    if (frName) return frName.name;
+    // Try to get from species data
+    if (species?.names) {
+        const frName = species.names.find(n => n.language.name === 'fr');
+        if (frName) {
+            // Update cache
+            if (species.id) {
+                frenchNameToIdCache.set(frName.name.toLowerCase(), species.id);
+                frenchNameToIdCache.set(removeAccents(frName.name.toLowerCase()), species.id);
+                idToFrenchNameCache.set(species.id, frName.name);
+            }
+            return frName.name;
+        }
+    }
     
     return capitalize(fallbackName);
 }
 
-// French to English name mapping for instant lookup
-const FRENCH_TO_ENGLISH = {
-    // Gen 1
-    'bulbizarre': 'bulbasaur', 'herbizarre': 'ivysaur', 'florizarre': 'venusaur',
-    'salamèche': 'charmander', 'reptincel': 'charmeleon', 'dracaufeu': 'charizard',
-    'carapuce': 'squirtle', 'carabaffe': 'wartortle', 'tortank': 'blastoise',
-    'chenipan': 'caterpie', 'chrysacier': 'metapod', 'papilusion': 'butterfree',
-    'aspicot': 'weedle', 'coconfort': 'kakuna', 'dardargnan': 'beedrill',
-    'roucool': 'pidgey', 'roucoups': 'pidgeotto', 'roucarnage': 'pidgeot',
-    'rattata': 'rattata', 'rattatac': 'raticate', 'piafabec': 'spearow', 'rapasdepic': 'fearow',
-    'abo': 'ekans', 'arbok': 'arbok', 'pikachu': 'pikachu', 'raichu': 'raichu',
-    'sabelette': 'sandshrew', 'sablaireau': 'sandslash', 'nidoran♀': 'nidoran-f', 'nidorina': 'nidorina',
-    'nidoqueen': 'nidoqueen', 'nidoran♂': 'nidoran-m', 'nidorino': 'nidorino', 'nidoking': 'nidoking',
-    'mélofée': 'clefairy', 'mélodelfe': 'clefable', 'goupix': 'vulpix', 'feunard': 'ninetales',
-    'rondoudou': 'jigglypuff', 'grodoudou': 'wigglytuff', 'nosferapti': 'zubat', 'nosferalto': 'golbat',
-    'mystherbe': 'oddish', 'ortide': 'gloom', 'rafflesia': 'vileplume', 'paras': 'paras',
-    'parasect': 'parasect', 'mimitoss': 'venonat', 'aéromite': 'venomoth', 'taupiqueur': 'diglett',
-    'triopikeur': 'dugtrio', 'miaouss': 'meowth', 'persian': 'persian', 'psykokwak': 'psyduck',
-    'akwakwak': 'golduck', 'férosinge': 'mankey', 'colossinge': 'primeape', 'caninos': 'growlithe',
-    'arcanin': 'arcanine', 'ptitard': 'poliwag', 'têtarte': 'poliwhirl', 'tartard': 'poliwrath',
-    'abra': 'abra', 'kadabra': 'kadabra', 'alakazam': 'alakazam', 'machoc': 'machop',
-    'machopeur': 'machoke', 'mackogneur': 'machamp', 'chétiflor': 'bellsprout', 'boustiflor': 'weepinbell',
-    'empiflor': 'victreebel', 'tentacool': 'tentacool', 'tentacruel': 'tentacruel', 'racaillou': 'geodude',
-    'gravalanch': 'graveler', 'grolem': 'golem', 'ponyta': 'ponyta', 'galopa': 'rapidash',
-    'ramoloss': 'slowpoke', 'flagadoss': 'slowbro', 'magnéti': 'magnemite', 'magnéton': 'magneton',
-    'canarticho': 'farfetchd', 'doduo': 'doduo', 'dodrio': 'dodrio', 'otaria': 'seel',
-    'lamantine': 'dewgong', 'tadmorv': 'grimer', 'grotadmorv': 'muk', 'kokiyas': 'shellder',
-    'crustabri': 'cloyster', 'fantominus': 'gastly', 'spectrum': 'haunter', 'ectoplasma': 'gengar',
-    'onix': 'onix', 'soporifik': 'drowzee', 'hypnomade': 'hypno', 'krabby': 'krabby',
-    'krabboss': 'kingler', 'voltorbe': 'voltorb', 'électrode': 'electrode', 'noeunoeuf': 'exeggcute',
-    'noadkoko': 'exeggutor', 'osselait': 'cubone', 'ossatueur': 'marowak', 'tygnon': 'hitmonchan',
-    'kicklee': 'hitmonlee', 'excelangue': 'lickitung', 'smogo': 'koffing', 'smogogo': 'weezing',
-    'rhinocorne': 'rhyhorn', 'rhinoféros': 'rhydon', 'leveinard': 'chansey', 'saquedeneu': 'tangela',
-    'kangourex': 'kangaskhan', 'hypotrempe': 'horsea', 'hypocéan': 'seadra', 'poissirène': 'goldeen',
-    'poissoroy': 'seaking', 'stari': 'staryu', 'staross': 'starmie', 'mime jr.': 'mime-jr',
-    'm. mime': 'mr-mime', 'insécateur': 'scyther', 'lippoutou': 'jynx', 'élektek': 'electabuzz',
-    'magmar': 'magmar', 'scarabrute': 'pinsir', 'tauros': 'tauros', 'magicarpe': 'magikarp',
-    'léviator': 'gyarados', 'lokhlass': 'lapras', 'métamorph': 'ditto', 'évoli': 'eevee',
-    'aquali': 'vaporeon', 'voltali': 'jolteon', 'pyroli': 'flareon', 'porygon': 'porygon',
-    'amonita': 'omanyte', 'amonistar': 'omastar', 'kabuto': 'kabuto', 'kabutops': 'kabutops',
-    'ptéra': 'aerodactyl', 'ronflex': 'snorlax', 'artikodin': 'articuno', 'électhor': 'zapdos',
-    'sulfura': 'moltres', 'minidraco': 'dratini', 'draco': 'dragonair', 'dracolosse': 'dragonite',
-    'mewtwo': 'mewtwo', 'mew': 'mew',
-    // Gen 2
-    'germignon': 'chikorita', 'macronium': 'bayleef', 'méganium': 'meganium',
-    'héricendre': 'cyndaquil', 'feurisson': 'quilava', 'typhlosion': 'typhlosion',
-    'kaiminus': 'totodile', 'crocrodil': 'croconaw', 'aligatueur': 'feraligatr',
-    'fouinette': 'sentret', 'fouinar': 'furret', 'hoothoot': 'hoothoot', 'noarfang': 'noctowl',
-    'coxy': 'ledyba', 'coxyclaque': 'ledian', 'mimigal': 'spinarak', 'migalos': 'ariados',
-    'nostenfer': 'crobat', 'loupio': 'chinchou', 'lanturn': 'lanturn', 'pichu': 'pichu',
-    'mélo': 'cleffa', 'toudoudou': 'igglybuff', 'togepi': 'togepi', 'togetic': 'togetic',
-    'natu': 'natu', 'xatu': 'xatu', 'wattouat': 'mareep', 'lainergie': 'flaaffy',
-    'pharamp': 'ampharos', 'joliflor': 'bellossom', 'marill': 'marill', 'azumarill': 'azumarill',
-    'simularbre': 'sudowoodo', 'tarpaud': 'politoed', 'granivol': 'hoppip', 'floravol': 'skiploom',
-    'cotovol': 'jumpluff', 'capumain': 'aipom', 'tournegrin': 'sunkern', 'héliatronc': 'sunflora',
-    'yanma': 'yanma', 'axoloto': 'wooper', 'maraiste': 'quagsire', 'mentali': 'espeon',
-    'noctali': 'umbreon', 'cornèbre': 'murkrow', 'roigada': 'slowking', 'feuforêve': 'misdreavus',
-    'zarbi': 'unown', 'qulbutoké': 'wobbuffet', 'girafarig': 'girafarig', 'pomdepik': 'pineco',
-    'foretress': 'forretress', 'insolourdo': 'dunsparce', 'scorplane': 'gligar', 'steelix': 'steelix',
-    'snubbull': 'snubbull', 'granbull': 'granbull', 'qwilfish': 'qwilfish', 'cizayox': 'scizor',
-    'caratroc': 'shuckle', 'scarhino': 'heracross', 'farfuret': 'sneasel', 'teddiursa': 'teddiursa',
-    'ursaring': 'ursaring', 'limagma': 'slugma', 'volcaropod': 'magcargo', 'marcacrin': 'swinub',
-    'cochignon': 'piloswine', 'corayon': 'corsola', 'rémoraid': 'remoraid', 'octillery': 'octillery',
-    'cadoizo': 'delibird', 'démanta': 'mantine', 'airmure': 'skarmory', 'malosse': 'houndour',
-    'démolosse': 'houndoom', 'hyporoi': 'kingdra', 'phanpy': 'phanpy', 'donphan': 'donphan',
-    'porygon2': 'porygon2', 'cerfrousse': 'stantler', 'queulorior': 'smeargle', 'debugant': 'tyrogue',
-    'kapoera': 'hitmontop', 'lippouti': 'smoochum', 'élekid': 'elekid', 'magby': 'magby',
-    'écrémeuh': 'miltank', 'leuphorie': 'blissey', 'raikou': 'raikou', 'entei': 'entei',
-    'suicune': 'suicune', 'embrylex': 'larvitar', 'ymphect': 'pupitar', 'tyranocif': 'tyranitar',
-    'lugia': 'lugia', 'ho-oh': 'ho-oh', 'celebi': 'celebi',
-    // Gen 3 legendaries & starters
-    'arcko': 'treecko', 'massko': 'grovyle', 'jungko': 'sceptile',
-    'poussifeu': 'torchic', 'galifeu': 'combusken', 'braségali': 'blaziken',
-    'gobou': 'mudkip', 'flobio': 'marshtomp', 'laggron': 'swampert',
-    'regirock': 'regirock', 'regice': 'regice', 'registeel': 'registeel',
-    'latias': 'latias', 'latios': 'latios', 'kyogre': 'kyogre', 'groudon': 'groudon',
-    'rayquaza': 'rayquaza', 'jirachi': 'jirachi', 'deoxys': 'deoxys',
-    // Gen 4 legendaries & popular
-    'dialga': 'dialga', 'palkia': 'palkia', 'giratina': 'giratina',
-    'créhelf': 'uxie', 'créfollet': 'mesprit', 'créfadet': 'azelf',
-    'heatran': 'heatran', 'regigigas': 'regigigas', 'cresselia': 'cresselia',
-    'phione': 'phione', 'manaphy': 'manaphy', 'darkrai': 'darkrai',
-    'shaymin': 'shaymin', 'arceus': 'arceus', 'lucario': 'lucario',
-    'riolu': 'riolu', 'carchacrok': 'garchomp', 'carmache': 'gabite', 'griknot': 'gible',
-    // Gen 5
-    'victini': 'victini', 'reshiram': 'reshiram', 'zekrom': 'zekrom', 'kyurem': 'kyurem',
-    'cobaltium': 'cobalion', 'terrakium': 'terrakion', 'viridium': 'virizion',
-    'boréas': 'tornadus', 'fulguris': 'thundurus', 'démétéros': 'landorus',
-    'keldeo': 'keldeo', 'meloetta': 'meloetta', 'genesect': 'genesect',
-    // Gen 6
-    'xerneas': 'xerneas', 'yveltal': 'yveltal', 'zygarde': 'zygarde',
-    'diancie': 'diancie', 'hoopa': 'hoopa', 'volcanion': 'volcanion',
-    // Gen 7
-    'cosmog': 'cosmog', 'cosmovum': 'cosmoem', 'solgaleo': 'solgaleo', 'lunala': 'lunala',
-    'necrozma': 'necrozma', 'magearna': 'magearna', 'marshadow': 'marshadow',
-    'zeraora': 'zeraora',
-    // Gen 8
-    'zacian': 'zacian', 'zamazenta': 'zamazenta', 'éthernatos': 'eternatus',
-    'kubfu': 'kubfu', 'shifours': 'urshifu', 'zarude': 'zarude', 'sylveroy': 'calyrex',
-    // Gen 9 - Starters
-    'poussacha': 'sprigatito', 'matourgeon': 'floragato', 'miascarade': 'meowscarada',
-    'chochodile': 'fuecoco', 'crocogril': 'crocalor', 'flâmigator': 'skeledirge',
-    'coiffeton': 'quaxly', 'canarbello': 'quaxwell', 'palmaval': 'quaquaval',
-    // Gen 9 - Legendaries
-    'koraidon': 'koraidon', 'miraidon': 'miraidon',
-    'chongjian': 'wo-chien', 'baojian': 'chien-pao', 'dinglu': 'ting-lu', 'yuyu': 'chi-yu',
-    'ogerpon': 'ogerpon', 'terapagos': 'terapagos', 'félécanis': 'okidogi',
-    'poltchageist': 'poltchageist', 'sinistcha': 'sinistcha',
-    // Gen 9 - Pseudo-legendary
-    'frigodo': 'frigibax', 'cryodo': 'arctibax', 'glaivodo': 'baxcalibur',
-    // Gen 9 - Mythical
-    'pêchaminus': 'pecharunt'
-};
-
 /**
  * Find Pokemon by name (French or English) or ID
- * Returns the Pokemon data or null if not found
+ * Uses the French names cache for reverse lookup
  */
-/**
- * Remove accents from a string for accent-insensitive comparison
- */
-function removeAccents(str) {
-    return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-}
-
-// Pre-compute accent-free version of French names for faster lookup
-const FRENCH_TO_ENGLISH_NO_ACCENTS = {};
-for (const [frenchName, englishName] of Object.entries(FRENCH_TO_ENGLISH)) {
-    FRENCH_TO_ENGLISH_NO_ACCENTS[removeAccents(frenchName)] = englishName;
-}
-
 async function findPokemon(query) {
     const normalizedQuery = query.toLowerCase().trim();
     const noAccentQuery = removeAccents(normalizedQuery);
@@ -481,31 +760,26 @@ async function findPokemon(query) {
     let pokemon = await fetchPokemon(normalizedQuery);
     if (pokemon) return pokemon;
     
-    // Check French to English mapping (with accents)
-    if (FRENCH_TO_ENGLISH[normalizedQuery]) {
-        pokemon = await fetchPokemon(FRENCH_TO_ENGLISH[normalizedQuery]);
-        if (pokemon) return pokemon;
-    }
-    
-    // Check French to English mapping (without accents)
-    if (FRENCH_TO_ENGLISH_NO_ACCENTS[noAccentQuery]) {
-        pokemon = await fetchPokemon(FRENCH_TO_ENGLISH_NO_ACCENTS[noAccentQuery]);
-        if (pokemon) return pokemon;
-    }
-    
-    // Check if we have this French name in dynamic cache (with accents)
+    // Check French names cache (supports both with and without accents)
     if (frenchNameToIdCache.has(normalizedQuery)) {
         const pokemonId = frenchNameToIdCache.get(normalizedQuery);
         return await fetchPokemon(pokemonId);
     }
     
-    // Check dynamic cache without accents
-    for (const [cachedName, pokemonId] of frenchNameToIdCache.entries()) {
-        if (removeAccents(cachedName) === noAccentQuery) {
-            return await fetchPokemon(pokemonId);
-        }
+    // Try without accents
+    if (frenchNameToIdCache.has(noAccentQuery)) {
+        const pokemonId = frenchNameToIdCache.get(noAccentQuery);
+        return await fetchPokemon(pokemonId);
     }
     
+    // If cache is loaded but name not found, try fetching by ID range
+    // This helps find Pokemon not yet in cache
+    if (frenchNamesCacheLoaded) {
+        return null;
+    }
+    
+    // Cache not fully loaded - try a slower search through the API
+    // This is a fallback for when the cache hasn't been built yet
     return null;
 }
 
@@ -677,6 +951,8 @@ async function performCatch(message, options = {}) {
             name: pokemon.name,
             isShiny
         });
+        const coinReward = getCatchCoinReward(rarity);
+        const newBalance = await db.addMoney(userId, guildId, coinReward, 'pokemon_catch', `Capture: ${frenchName}`);
         
         const counts = await db.getPokemonCounts(userId, guildId);
         
@@ -688,6 +964,7 @@ async function performCatch(message, options = {}) {
                 `• Type: ${formatTypes(pokemon.types)}\n` +
                 `• Rareté: ${rarity.name}\n` +
                 `• N° Pokédex: #${pokemon.id}\n` +
+                `💰 **+${coinReward.toLocaleString()} coins** (solde: ${newBalance.toLocaleString()})\n` +
                 (description ? `\n📖 *${description}*` : '') +
                 `\n\n${catchResult.isNewEntry ? '🆕 **Nouveau Pokémon ajouté au Pokédex !**' : ''}` +
                 `${catchResult.isFirstShiny ? '\n⭐ **Premier shiny de cette espèce !**' : ''}`
@@ -766,6 +1043,8 @@ export async function handleQTEInteraction(interaction) {
             name: pokemon.name,
             isShiny
         });
+        const coinReward = getCatchCoinReward(rarity);
+        const newBalance = await db.addMoney(interaction.user.id, interaction.guild.id, coinReward, 'pokemon_catch', `Capture: ${frenchName}`);
         
         const counts = await db.getPokemonCounts(interaction.user.id, interaction.guild.id);
         
@@ -778,6 +1057,7 @@ export async function handleQTEInteraction(interaction) {
                 `• Type: ${formatTypes(pokemon.types)}\n` +
                 `• Rareté: ${rarity.name}\n` +
                 `• N° Pokédex: #${pokemon.id}\n` +
+                `💰 **+${coinReward.toLocaleString()} coins** (solde: ${newBalance.toLocaleString()})\n` +
                 (description ? `\n📖 *${description}*` : '') +
                 `\n\n${catchResult.isNewEntry ? '🆕 **Nouveau Pokémon ajouté au Pokédex !**' : ''}` +
                 `${catchResult.isFirstShiny ? '\n⭐ **Premier shiny de cette espèce !**' : ''}`
@@ -1249,6 +1529,120 @@ async function generatePokemonInfoImage(pokemon, species, frenchName, descriptio
 }
 
 /**
+ * Generate a grid-based Pokedex image for a filtered list of Pokemon IDs
+ * Same style as the main Pokedex but for specific IDs (legendary, mythical, etc.)
+ */
+async function generateFilteredPokedexImage(pokemonIds, caughtMap, filterColor = '#5bc0de') {
+    const cols = 5;
+    const cellSize = 65;
+    const spriteSize = 48;
+    const cellPadding = 3;
+    const padding = 8;
+    const cornerRadius = 8;
+    
+    const totalPokemon = pokemonIds.length;
+    const rows = Math.ceil(totalPokemon / cols);
+    
+    const width = cols * cellSize + padding * 2;
+    const height = rows * cellSize + padding * 2;
+    
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    
+    // Background color based on filter type
+    ctx.fillStyle = filterColor;
+    ctx.fillRect(0, 0, width, height);
+    
+    // Load sprites for caught Pokemon only (optimization)
+    const spritePromises = pokemonIds.map(async (id) => {
+        const caught = caughtMap.get(id);
+        if (!caught) return { id, sprite: null, caught: false };
+        
+        try {
+            const pokemon = await fetchPokemon(id);
+            if (!pokemon) return { id, sprite: null, caught: true };
+            
+            // Shiny takes priority
+            const spriteUrl = caught.shiny_caught 
+                ? (pokemon.sprites.front_shiny || pokemon.sprites.front_default)
+                : pokemon.sprites.front_default;
+            
+            if (!spriteUrl) return { id, sprite: null, caught: true, isShiny: caught.shiny_caught };
+            
+            const sprite = await loadImage(spriteUrl);
+            return { id, sprite, caught: true, isShiny: caught.shiny_caught };
+        } catch {
+            return { id, sprite: null, caught: true };
+        }
+    });
+    
+    const spriteData = await Promise.all(spritePromises);
+    const spriteMap = new Map(spriteData.map(s => [s.id, s]));
+    
+    // Draw grid cells
+    for (let i = 0; i < totalPokemon; i++) {
+        const pokemonId = pokemonIds[i];
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const x = padding + col * cellSize + cellPadding;
+        const y = padding + row * cellSize + cellPadding;
+        const innerSize = cellSize - cellPadding * 2;
+        
+        const data = spriteMap.get(pokemonId);
+        const isCaught = data?.caught;
+        const isShiny = data?.isShiny;
+        
+        // Cell border (darker version of filter color)
+        roundRect(ctx, x, y, innerSize, innerSize, cornerRadius);
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+        ctx.fill();
+        
+        // Cell inner background
+        roundRect(ctx, x + 2, y + 2, innerSize - 4, innerSize - 4, cornerRadius - 2);
+        if (isCaught) {
+            // Caught - lighter
+            ctx.fillStyle = isShiny ? '#fff8dc' : 'rgba(255, 255, 255, 0.5)';
+        } else {
+            // Not caught - slightly darker/faded
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+        }
+        ctx.fill();
+        
+        // Shiny sparkle border
+        if (isShiny) {
+            roundRect(ctx, x + 1, y + 1, innerSize - 2, innerSize - 2, cornerRadius - 1);
+            ctx.strokeStyle = '#ffd700';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+        
+        // Draw Pokemon number (top right corner)
+        ctx.fillStyle = isCaught ? '#333' : '#555';
+        ctx.font = 'bold 11px Arial';
+        ctx.textAlign = 'right';
+        ctx.fillText(pokemonId.toString(), x + innerSize - 5, y + 14);
+        
+        // Draw sprite or silhouette placeholder
+        if (data?.sprite) {
+            const offsetX = (innerSize - spriteSize) / 2;
+            const offsetY = (innerSize - spriteSize) / 2 + 2;
+            ctx.drawImage(data.sprite, x + offsetX, y + offsetY, spriteSize, spriteSize);
+            
+            // Draw Pokeball icon (bottom left corner) for caught Pokemon
+            drawPokeball(ctx, x + 4, y + innerSize - 16, 12);
+        } else {
+            // Show just the number larger in center for uncaught
+            ctx.fillStyle = '#444';
+            ctx.font = 'bold 18px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText(pokemonId.toString(), x + innerSize / 2, y + innerSize / 2 + 6);
+        }
+    }
+    
+    return canvas.toBuffer('image/png');
+}
+
+/**
  * Generate a grid-based Pokedex image with slots for each Pokemon
  * Shows sprites for caught Pokemon (shiny priority), empty slots for uncaught
  */
@@ -1369,7 +1763,103 @@ async function generatePokedexGridImage(startId, endId, caughtMap) {
 }
 
 /**
+ * Create navigation buttons for Pokedex pagination
+ * @param {number} currentPage - Current page number
+ * @param {number} totalPages - Total number of pages
+ * @param {string} prefix - Button ID prefix (e.g., 'dex' or 'dex_legendary')
+ * @param {string} userId - User ID to restrict button usage
+ */
+function createPokedexNavButtons(currentPage, totalPages, prefix, userId) {
+    const row = new ActionRowBuilder();
+    
+    // First button (only if > 2 pages)
+    if (totalPages > 2) {
+        row.addComponents(
+            new ButtonBuilder()
+                .setCustomId(`${prefix}_first_${userId}`)
+                .setLabel('⏮️ Début')
+                .setStyle(ButtonStyle.Secondary)
+                .setDisabled(currentPage === 1)
+        );
+    }
+    
+    // Previous button
+    row.addComponents(
+        new ButtonBuilder()
+            .setCustomId(`${prefix}_prev_${userId}`)
+            .setLabel('◀️ Préc.')
+            .setStyle(ButtonStyle.Primary)
+            .setDisabled(currentPage === 1)
+    );
+    
+    // Page indicator (disabled button)
+    row.addComponents(
+        new ButtonBuilder()
+            .setCustomId(`${prefix}_page_${userId}`)
+            .setLabel(`${currentPage}/${totalPages}`)
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(true)
+    );
+    
+    // Next button
+    row.addComponents(
+        new ButtonBuilder()
+            .setCustomId(`${prefix}_next_${userId}`)
+            .setLabel('Suiv. ▶️')
+            .setStyle(ButtonStyle.Primary)
+            .setDisabled(currentPage === totalPages)
+    );
+    
+    // End button (only if > 2 pages)
+    if (totalPages > 2) {
+        row.addComponents(
+            new ButtonBuilder()
+                .setCustomId(`${prefix}_last_${userId}`)
+                .setLabel('Fin ⏭️')
+                .setStyle(ButtonStyle.Secondary)
+                .setDisabled(currentPage === totalPages)
+        );
+    }
+    
+    return row;
+}
+
+/**
+ * Get Pokemon IDs for a given filter category
+ * Uses the categories cache for accurate data
+ */
+function getFilteredPokemonIds(filter) {
+    const f = filter?.toLowerCase();
+    switch (f) {
+        case 'legendary':
+        case 'legendaire':
+        case 'légendaire':
+        case 'leg':
+            return { ids: [...getCategoryIds('legendary')].sort((a, b) => a - b), name: 'Légendaires', emoji: '🌟', color: 0xFFD700, bgColor: '#d4a017' };
+        case 'mythical':
+        case 'mythique':
+        case 'fabuleux':
+        case 'fab':
+            return { ids: [...getCategoryIds('mythical')].sort((a, b) => a - b), name: 'Fabuleux', emoji: '✨', color: 0xFF00FF, bgColor: '#c850c0' };
+        case 'pseudo':
+        case 'pseudo-legendary':
+        case 'pseudo-légendaire':
+            return { ids: [...getCategoryIds('pseudo')].sort((a, b) => a - b), name: 'Pseudo-Légendaires', emoji: '💎', color: 0x9B59B6, bgColor: '#8e44ad' };
+        case 'starter':
+        case 'starters':
+        case 'départ':
+            return { ids: [...getCategoryIds('starter')].sort((a, b) => a - b), name: 'Starters', emoji: '🔥', color: 0xE67E22, bgColor: '#e67e22' };
+        case 'shiny':
+        case 'shinies':
+            return { ids: null, name: 'Shinies', emoji: '✨', color: 0xFFD700, bgColor: '#f1c40f', special: 'shiny' };
+        default:
+            return null;
+    }
+}
+
+/**
  * Pokedex command - View caught Pokemon progress in grid format
+ * Supports filters: legendary, mythical, starter, pseudo, shiny
  */
 export async function pokedexCommand(message, args) {
     const userId = message.author.id;
@@ -1384,6 +1874,114 @@ export async function pokedexCommand(message, args) {
         caughtMap.set(entry.pokemon_id, entry);
     }
     
+    // Check if first argument is a filter
+    const filterData = getFilteredPokemonIds(args[0]);
+    
+    if (filterData) {
+        // ========== FILTERED GRID MODE ==========
+        let filteredIds = filterData.ids;
+        
+        // Special handling for shiny filter (show only caught shinies)
+        if (filterData.special === 'shiny') {
+            filteredIds = [...caughtMap.entries()]
+                .filter(([id, entry]) => entry.shiny_caught)
+                .map(([id]) => id)
+                .sort((a, b) => a - b);
+        }
+        
+        if (!filteredIds || filteredIds.length === 0) {
+            const embed = new EmbedBuilder()
+                .setTitle(`${filterData.emoji} Pokédex - ${filterData.name}`)
+                .setDescription(filterData.special === 'shiny' 
+                    ? 'Tu n\'as pas encore attrapé de shiny !' 
+                    : 'Aucun Pokémon dans cette catégorie.')
+                .setColor(filterData.color);
+            return message.reply({ embeds: [embed] });
+        }
+        
+        // Pagination for filtered list (35 per page = 5x7 grid, same as main pokedex)
+        const perPage = 35;
+        const totalPages = Math.ceil(filteredIds.length / perPage);
+        const page = Math.max(1, Math.min(parseInt(args[1]) || 1, totalPages));
+        const startIdx = (page - 1) * perPage;
+        const pageIds = filteredIds.slice(startIdx, startIdx + perPage);
+        
+        // Count caught in this category
+        let caughtCount = 0;
+        let shinyCount = 0;
+        for (const id of filteredIds) {
+            const entry = caughtMap.get(id);
+            if (entry) {
+                caughtCount++;
+                if (entry.shiny_caught) shinyCount++;
+            }
+        }
+        
+        // Show loading message
+        const loadingEmbed = new EmbedBuilder()
+            .setDescription(`🔍 Génération du Pokédex ${filterData.name}...`)
+            .setColor(filterData.color);
+        const loadingMsg = await message.reply({ embeds: [loadingEmbed] });
+        
+        try {
+            // Generate the filtered grid image
+            const imageBuffer = await generateFilteredPokedexImage(pageIds, caughtMap, filterData.bgColor);
+            const attachment = new AttachmentBuilder(imageBuffer, { name: 'pokedex-filtered.png' });
+            
+            const completionPercent = ((caughtCount / filteredIds.length) * 100).toFixed(1);
+            
+            const embed = new EmbedBuilder()
+                .setTitle(`${filterData.emoji} Pokédex - ${filterData.name}`)
+                .setDescription(`**${caughtCount}/${filteredIds.length}** capturés (${completionPercent}%)${shinyCount > 0 ? ` • ${shinyCount} ✨` : ''}`)
+                .setColor(filterData.color)
+                .setImage('attachment://pokedex-filtered.png')
+                .setFooter({ text: `Page ${page}/${totalPages}` });
+            
+            // Add navigation buttons if more than 1 page
+            const components = [];
+            if (totalPages > 1) {
+                const navRow = createPokedexNavButtons(page, totalPages, `dex_${args[0].toLowerCase()}`, userId);
+                components.push(navRow);
+            }
+            
+            await loadingMsg.edit({ embeds: [embed], files: [attachment], components });
+        } catch (error) {
+            console.error('Error generating filtered pokedex image:', error);
+            
+            // Fallback to text list
+            const lines = await Promise.all(pageIds.map(async (id) => {
+                const entry = caughtMap.get(id);
+                const caught = !!entry;
+                const shiny = entry?.shiny_caught ? ' ✨' : '';
+                const species = await fetchSpecies(id);
+                const frenchName = getFrenchName(species, species?.name || `Pokemon ${id}`);
+                const status = caught ? '✅' : '❌';
+                return `${status} **#${id.toString().padStart(3, '0')}** ${frenchName}${shiny}`;
+            }));
+            
+            const embed = new EmbedBuilder()
+                .setTitle(`${filterData.emoji} Pokédex - ${filterData.name}`)
+                .setDescription(lines.join('\n'))
+                .setColor(filterData.color)
+                .addFields(
+                    { name: '📊 Progression', value: `${caughtCount}/${filteredIds.length}`, inline: true },
+                    { name: '✨ Shinies', value: `${shinyCount}`, inline: true }
+                )
+                .setFooter({ text: `Page ${page}/${totalPages}` });
+            
+            // Add navigation buttons if more than 1 page
+            const fallbackComponents = [];
+            if (totalPages > 1) {
+                const navRow = createPokedexNavButtons(page, totalPages, `dex_${args[0].toLowerCase()}`, userId);
+                fallbackComponents.push(navRow);
+            }
+            
+            await loadingMsg.edit({ embeds: [embed], components: fallbackComponents });
+        }
+        return;
+    }
+    
+    // ========== GRID MODE (default) ==========
     // Pagination by Pokemon ID ranges (35 per page = 5x7 grid)
     const perPage = 35;
     const totalPages = Math.ceil(MAX_POKEMON_ID / perPage);
@@ -1418,7 +2016,10 @@ export async function pokedexCommand(message, args) {
         
         const embed = new EmbedBuilder()
             .setTitle(`📕 Pokédex de ${message.author.username}`)
-            .setDescription(`**#${startId.toString().padStart(3, '0')}** à **#${endId.toString().padStart(3, '0')}** — ${caughtInRange}/${endId - startId + 1} capturés${shinyInRange > 0 ? ` (${shinyInRange} ✨)` : ''}`)
+            .setDescription(
+                `**#${startId.toString().padStart(3, '0')}** à **#${endId.toString().padStart(3, '0')}** — ${caughtInRange}/${endId - startId + 1} capturés${shinyInRange > 0 ? ` (${shinyInRange} ✨)` : ''}\n\n` +
+                `**Filtres :** \`$dex legendary\` • \`$dex mythical\` • \`$dex starter\` • \`$dex pseudo\` • \`$dex shiny\``
+            )
             .setColor(0xE74C3C)
             .setImage('attachment://pokedex.png')
             .addFields(
@@ -1426,9 +2027,12 @@ export async function pokedexCommand(message, args) {
                 { name: '🎯 Attrapés', value: `${counts.total}`, inline: true },
                 { name: '✨ Shinies', value: `${counts.shiny}`, inline: true }
             )
-            .setFooter({ text: `Page ${page}/${totalPages} • $pokedex <page> pour naviguer` });
+            .setFooter({ text: `Page ${page}/${totalPages}` });
         
-        await loadingMsg.edit({ embeds: [embed], files: [attachment] });
+        // Add navigation buttons
+        const navRow = createPokedexNavButtons(page, totalPages, 'dex_main', userId);
+        
+        await loadingMsg.edit({ embeds: [embed], files: [attachment], components: [navRow] });
     } catch (error) {
         console.error('Error generating pokedex image:', error);
         
@@ -1438,7 +2042,10 @@ export async function pokedexCommand(message, args) {
             .setDescription(`Erreur lors de la génération de l'image.\n\n**Progression:** ${counts.unique}/${MAX_POKEMON_ID} Pokémon capturés`)
             .setColor(0xE74C3C);
         
-        await loadingMsg.edit({ embeds: [embed] });
+        // Add navigation buttons even in fallback
+        const navRow = createPokedexNavButtons(page, totalPages, 'dex_main', userId);
+        
+        await loadingMsg.edit({ embeds: [embed], components: [navRow] });
     }
 }
 
@@ -1552,6 +2159,280 @@ export async function pokemonInfoCommand(message, args) {
 }
 
 /**
+ * Convert mega stone id to PokeAPI form name (e.g. charizardite-x -> charizard-mega-x)
+ */
+function stoneIdToMegaFormName(stoneId) {
+    const special = { 'mewtwonite-x': 'mewtwo-mega-x', 'mewtwonite-y': 'mewtwo-mega-y' };
+    if (special[stoneId]) return special[stoneId];
+    const match = stoneId.match(/^(.+?)ite(-[a-z0-9]+)?$/i);
+    if (!match) return null;
+    const base = match[1];
+    const suffix = match[2] || '';
+    return base + '-mega' + suffix;
+}
+
+/**
+ * Evolve command - Evolve a Pokemon by Pokedex ID
+ * Usage: $evolve <n° Pokédex> [target] or $evolve <n°> mega [pierre]
+ * If multiple evolutions are possible, user must specify target (name or ID)
+ */
+export async function evolveCommand(message, args) {
+    const userId = message.author.id;
+    const guildId = message.guild.id;
+    
+    const pokemonIdArg = parseInt(args[0], 10);
+    if (isNaN(pokemonIdArg) || pokemonIdArg < 1 || pokemonIdArg > MAX_POKEMON_ID) {
+        await message.reply(`❌ Utilisation : \`$evolve <n° Pokédex>\` (ex: $evolve 1 pour évoluer un Bulbizarre)\n` +
+            `Si plusieurs évolutions possibles : \`$evolve <n°> <cible>\` (ex: $evolve 281 gardevoir)\n` +
+            `Pour méga-évolution : \`$evolve <n°> mega [pierre]\``);
+        return;
+    }
+    
+    const catches = await db.getPokemonCatchesByPokemonId(userId, guildId, pokemonIdArg, 1);
+    if (catches.length === 0) {
+        await message.reply(`❌ Tu ne possèdes pas le Pokémon #${pokemonIdArg} du Pokédex. Utilise \`$pc\` pour voir ta boîte.`);
+        return;
+    }
+    
+    const catchRow = catches[0];
+    const pokemonId = catchRow.pokemon_id;
+    const evolutionStage = catchRow.evolution_stage ?? 1;
+    const isMega = !!catchRow.is_mega;
+    
+    if (isMega) {
+        await message.reply('❌ Ce Pokémon est déjà en forme Méga.');
+        return;
+    }
+    
+    const species = await fetchSpecies(pokemonId);
+    if (!species) {
+        await message.reply('❌ Impossible de charger les données d\'évolution.');
+        return;
+    }
+    
+    const currentFrenchName = getFrenchName(species, catchRow.pokemon_name);
+    const evoInfo = await getEvolutionInfo(pokemonId, species);
+    const isSpecial = isSpecialPokemon(pokemonId);
+    const costs = isSpecial ? EVOLVE_COST.special : EVOLVE_COST.normal;
+    const balance = await db.getBalance(userId, guildId);
+    
+    const wantMega = args[1]?.toLowerCase() === 'mega';
+    
+    // ========== MEGA EVOLUTION ==========
+    if (wantMega) {
+        if (!evoInfo.canMega) {
+            await message.reply('❌ Ce Pokémon ne peut pas faire de Méga-évolution (ou n\'est pas au stade final).');
+            return;
+        }
+        const stonesForSpecies = evoInfo.megaStones;
+        const stoneArg = args[2]?.toLowerCase();
+        
+        // If multiple mega stones and none specified, show options
+        if (!stoneArg && stonesForSpecies.length > 1) {
+            const list = await Promise.all(stonesForSpecies.map(async s => {
+                const formName = stoneIdToMegaFormName(s.stoneId);
+                return `• \`${s.stoneId}\` → **${s.frenchName}** (${formName?.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') || '?'})`;
+            }));
+            const embed = new EmbedBuilder()
+                .setTitle(`🔮 Méga-évolutions possibles pour ${currentFrenchName}`)
+                .setDescription(
+                    `Ce Pokémon a **${stonesForSpecies.length} formes Méga** possibles !\n\n` +
+                    list.join('\n') +
+                    `\n\n**Utilisation :** \`$evolve ${pokemonIdArg} mega <pierre>\`\n` +
+                    `*(Tu dois d'abord acheter la pierre dans \`$megashop\`)*`
+                )
+                .setColor(0x9B59B6)
+                .setTimestamp();
+            await message.reply({ embeds: [embed] });
+            return;
+        }
+        
+        const stone = stoneArg
+            ? stonesForSpecies.find(s => s.stoneId === stoneArg)
+            : stonesForSpecies.length === 1 ? stonesForSpecies[0] : null;
+        
+        if (!stone) {
+            const list = stonesForSpecies.map(s => `\`${s.stoneId}\` (${s.frenchName})`).join(', ');
+            await message.reply(`❌ Pierre Méga invalide. Pierres disponibles : ${list}`);
+            return;
+        }
+        
+        const userStones = await db.getMegaStones(userId, guildId);
+        if ((userStones[stone.stoneId] || 0) < 1) {
+            await message.reply(`❌ Tu n'as pas la pierre **${stone.frenchName}** (\`${stone.stoneId}\`). Achète-la avec \`$megashop\`.`);
+            return;
+        }
+        const cost = costs.mega;
+        if (balance < cost) {
+            await message.reply(`❌ Il te faut **${cost.toLocaleString()}** coins pour la Méga-évolution. Tu as **${balance.toLocaleString()}** coins.`);
+            return;
+        }
+        const formName = stoneIdToMegaFormName(stone.stoneId);
+        if (!formName) {
+            await message.reply('❌ Erreur : forme Méga inconnue.');
+            return;
+        }
+        await db.removeMoney(userId, guildId, cost, 'pokemon_evolve', `Méga-évolution: ${catchRow.pokemon_name}`);
+        await db.useMegaStone(userId, guildId, stone.stoneId);
+        await db.updatePokemonEvolution(userId, guildId, catchRow.id, {
+            pokemonId,
+            pokemonName: catchRow.pokemon_name,
+            evolutionStage,
+            isMega: true,
+            megaForm: formName
+        });
+        const megaPokemon = await fetchPokemon(formName);
+        const megaFrenchName = formName.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+        const embed = new EmbedBuilder()
+            .setTitle(`✨ Méga-évolution !`)
+            .setDescription(`**${currentFrenchName}** est devenu **${megaFrenchName}** !\n\n💰 Coût : **${cost.toLocaleString()}** coins + pierre **${stone.frenchName}**`)
+            .setThumbnail(megaPokemon?.sprites?.other?.['official-artwork']?.front_default || megaPokemon?.sprites?.front_default || null)
+            .setColor(0x9B59B6)
+            .setTimestamp();
+        await message.reply({ embeds: [embed] });
+        return;
+    }
+    
+    // ========== NORMAL EVOLUTION ==========
+    if (evoInfo.isFinal || evoInfo.nextEvolutions.length === 0) {
+        const megaHint = evoInfo.canMega
+            ? `\nTu peux faire une **Méga-évolution** avec \`$evolve ${pokemonIdArg} mega\` (après avoir acheté la pierre dans \`$megashop\`).`
+            : '';
+        await message.reply('❌ Ce Pokémon est déjà au stade final et ne peut pas évoluer normalement.' + megaHint);
+        return;
+    }
+    
+    const targetArg = args[1]?.toLowerCase();
+    let targetId = null;
+    
+    // Multiple evolution options?
+    if (evoInfo.nextEvolutions.length > 1) {
+        // Fetch species data for all options to show French names
+        const optionsData = await Promise.all(evoInfo.nextEvolutions.map(async id => {
+            const sp = await fetchSpecies(id);
+            return { id, species: sp, frenchName: getFrenchName(sp, sp?.name || String(id)), englishName: sp?.name || String(id) };
+        }));
+        
+        if (!targetArg) {
+            // Show available options
+            const list = optionsData.map(o => `• **${o.frenchName}** (#${o.id}) → \`$evolve ${pokemonIdArg} ${o.id}\` ou \`$evolve ${pokemonIdArg} ${o.englishName}\``);
+            const embed = new EmbedBuilder()
+                .setTitle(`🔀 Évolutions possibles pour ${currentFrenchName}`)
+                .setDescription(
+                    `Ce Pokémon peut évoluer en **${optionsData.length} formes différentes** !\n\n` +
+                    list.join('\n') +
+                    `\n\n**Utilisation :** \`$evolve ${pokemonIdArg} <cible>\`\n` +
+                    `(Spécifie le n° Pokédex ou le nom anglais de l'évolution souhaitée)`
+                )
+                .setColor(0x3498DB)
+                .setTimestamp();
+            await message.reply({ embeds: [embed] });
+            return;
+        }
+        
+        // User specified a target - find it
+        const targetNum = parseInt(targetArg, 10);
+        const found = optionsData.find(o => 
+            o.id === targetNum || 
+            o.englishName?.toLowerCase() === targetArg ||
+            o.frenchName?.toLowerCase() === targetArg
+        );
+        
+        if (!found) {
+            const list = optionsData.map(o => `\`${o.id}\` (${o.frenchName})`).join(', ');
+            await message.reply(`❌ Évolution invalide. Options disponibles : ${list}`);
+            return;
+        }
+        
+        targetId = found.id;
+    } else {
+        // Single evolution path
+        targetId = evoInfo.nextEvolutions[0];
+    }
+    
+    const cost = evolutionStage === 1 ? costs.toSecond : costs.toThird;
+    if (balance < cost) {
+        await message.reply(`❌ Il te faut **${cost.toLocaleString()}** coins pour cette évolution. Tu as **${balance.toLocaleString()}** coins.`);
+        return;
+    }
+    
+    const nextSpecies = await fetchSpecies(targetId);
+    const nextName = nextSpecies?.name || String(targetId);
+    await db.removeMoney(userId, guildId, cost, 'pokemon_evolve', `Évolution: ${catchRow.pokemon_name} -> ${nextName}`);
+    await db.updatePokemonEvolution(userId, guildId, catchRow.id, {
+        pokemonId: targetId,
+        pokemonName: nextName,
+        evolutionStage: evoInfo.stage + 1,
+        isMega: false,
+        megaForm: null
+    });
+    const frenchNameNext = getFrenchName(nextSpecies, nextName);
+    const embed = new EmbedBuilder()
+        .setTitle('⬆️ Évolution réussie !')
+        .setDescription(`**${currentFrenchName}** a évolué en **${frenchNameNext}** !\n\n💰 Coût : **${cost.toLocaleString()}** coins`)
+        .setColor(0x2ECC71)
+        .setTimestamp();
+    await message.reply({ embeds: [embed] });
+}
+
+/**
+ * Mega stone shop - List and buy mega stones
+ */
+export async function megashopCommand(message, args) {
+    const userId = message.author.id;
+    const guildId = message.guild.id;
+    
+    const balance = await db.getBalance(userId, guildId);
+    
+    if (args[0]?.toLowerCase() === 'buy' || args[0]?.toLowerCase() === 'acheter') {
+        const stoneId = args[1]?.toLowerCase();
+        if (!stoneId) {
+            await message.reply('❌ Utilisation : `$megashop buy <id_pierre>` (ex: $megashop buy charizardite-x)');
+            return;
+        }
+        const stone = MEGA_STONES.find(s => s.stoneId === stoneId);
+        if (!stone) {
+            await message.reply('❌ Pierre inconnue. Utilise `$megashop` pour voir la liste.');
+            return;
+        }
+        const price = MEGA_STONE_PRICES[stone.priceTier] ?? 5000;
+        if (balance < price) {
+            await message.reply(`❌ Tu n'as pas assez de coins. **${stone.frenchName}** coûte **${price.toLocaleString()}** coins. Tu as **${balance.toLocaleString()}** coins.`);
+            return;
+        }
+        await db.removeMoney(userId, guildId, price, 'megashop', `Achat: ${stone.frenchName}`);
+        await db.addMegaStone(userId, guildId, stoneId, 1);
+        const newBalance = await db.getBalance(userId, guildId);
+        const embed = new EmbedBuilder()
+            .setTitle('🛒 Achat réussi')
+            .setDescription(`Tu as acheté **${stone.frenchName}** (\`${stone.stoneId}\`) pour **${price.toLocaleString()}** coins.\n\n💰 Solde : **${newBalance.toLocaleString()}** coins`)
+            .setColor(0x2ECC71)
+            .setTimestamp();
+        await message.reply({ embeds: [embed] });
+        return;
+    }
+    
+    // List shop
+    const lines = MEGA_STONES.map(s => {
+        const price = MEGA_STONE_PRICES[s.priceTier] ?? 5000;
+        return `• **${s.frenchName}** \`${s.stoneId}\` — **${price.toLocaleString()}** coins`;
+    });
+    const embed = new EmbedBuilder()
+        .setTitle('💎 Boutique Pierres Méga')
+        .setDescription(
+            `Achète des pierres Méga pour faire évoluer tes Pokémon en forme Méga.\n\n` +
+            `**Achat :** \`$megashop buy <id_pierre>\`\n\n` +
+            `**Liste des pierres :**\n${lines.slice(0, 25).join('\n')}` +
+            (lines.length > 25 ? `\n... et ${lines.length - 25} autres.` : '') +
+            `\n\n💰 Ton solde : **${balance.toLocaleString()}** coins`
+        )
+        .setColor(0x9B59B6)
+        .setFooter({ text: 'Évolution : $evolve <n° Pokédex> • Méga : $evolve <n°> mega <pierre>' })
+        .setTimestamp();
+    await message.reply({ embeds: [embed] });
+}
+
+/**
  * PC/Box command - View all caught Pokemon
  */
 export async function pcCommand(message, args) {
@@ -1588,9 +2469,10 @@ export async function pcCommand(message, args) {
     
     const pokemonList = catches.map((p, i) => {
         const shiny = p.is_shiny ? ' ✨' : '';
+        const mega = p.is_mega ? ' Méga' : '';
         const date = new Date(p.caught_at).toLocaleDateString('fr-FR');
         const frenchName = getFrenchName(speciesData[i], p.pokemon_name);
-        return `**${offset + i + 1}.** #${p.pokemon_id} ${frenchName}${shiny} • *${date}*`;
+        return `**${offset + i + 1}.** #${p.pokemon_id} ${frenchName}${mega}${shiny} • *${date}*`;
     }).join('\n');
     
     const embed = new EmbedBuilder()
@@ -1601,9 +2483,168 @@ export async function pcCommand(message, args) {
             { name: '📊 Total', value: `${counts.total} Pokémon`, inline: true },
             { name: '✨ Shinies', value: `${counts.shiny}`, inline: true }
         )
-        .setFooter({ text: `Page ${page}/${totalPages} • Utilise $pc <page> pour naviguer` });
+        .setFooter({ text: `Page ${page}/${totalPages} • $pc <page> | Évolution: $evolve <n° Pokédex> | Méga: $megashop` });
     
     await loadingMsg.edit({ embeds: [embed] });
+}
+
+/**
+ * Handle Pokedex navigation button interaction
+ */
+export async function handlePokedexNavigation(interaction) {
+    const customId = interaction.customId;
+    
+    // Check if this is a pokedex navigation button
+    if (!customId.startsWith('dex_')) return false;
+    
+    // Parse button ID: dex_<filter>_<action>_<userId>
+    // Examples: dex_main_next_123456, dex_legendary_prev_123456
+    const parts = customId.split('_');
+    if (parts.length < 4) return false;
+    
+    const filterType = parts[1]; // 'main', 'legendary', 'mythical', etc.
+    const action = parts[2]; // 'first', 'prev', 'next', 'last', 'page'
+    const ownerId = parts[3];
+    
+    // Check if it's a page indicator (disabled button)
+    if (action === 'page') return true;
+    
+    // Check if the user clicking is the owner
+    if (interaction.user.id !== ownerId) {
+        await interaction.reply({ content: '❌ Ce n\'est pas ton Pokédex !', ephemeral: true });
+        return true;
+    }
+    
+    await interaction.deferUpdate();
+    
+    const userId = interaction.user.id;
+    const guildId = interaction.guild.id;
+    
+    // Get current page from footer
+    const currentEmbed = interaction.message.embeds[0];
+    const footerText = currentEmbed?.footer?.text || '';
+    const pageMatch = footerText.match(/Page (\d+)\/(\d+)/);
+    
+    if (!pageMatch) {
+        await interaction.followUp({ content: '❌ Erreur de pagination.', ephemeral: true });
+        return true;
+    }
+    
+    let currentPage = parseInt(pageMatch[1], 10);
+    const totalPages = parseInt(pageMatch[2], 10);
+    
+    // Calculate new page based on action
+    let newPage = currentPage;
+    switch (action) {
+        case 'first': newPage = 1; break;
+        case 'prev': newPage = Math.max(1, currentPage - 1); break;
+        case 'next': newPage = Math.min(totalPages, currentPage + 1); break;
+        case 'last': newPage = totalPages; break;
+    }
+    
+    if (newPage === currentPage) return true;
+    
+    // Regenerate the pokedex for the new page
+    const pokedex = await db.getPokedex(userId, guildId);
+    const counts = await db.getPokemonCounts(userId, guildId);
+    
+    const caughtMap = new Map();
+    for (const entry of pokedex) {
+        caughtMap.set(entry.pokemon_id, entry);
+    }
+    
+    try {
+        if (filterType === 'main') {
+            // Main Pokedex grid
+            const perPage = 35;
+            const startId = (newPage - 1) * perPage + 1;
+            const endId = Math.min(newPage * perPage, MAX_POKEMON_ID);
+            
+            let caughtInRange = 0;
+            let shinyInRange = 0;
+            for (let id = startId; id <= endId; id++) {
+                const entry = caughtMap.get(id);
+                if (entry) {
+                    caughtInRange++;
+                    if (entry.shiny_caught) shinyInRange++;
+                }
+            }
+            
+            const imageBuffer = await generatePokedexGridImage(startId, endId, caughtMap);
+            const attachment = new AttachmentBuilder(imageBuffer, { name: 'pokedex.png' });
+            
+            const completionPercent = ((counts.unique / MAX_POKEMON_ID) * 100).toFixed(1);
+            
+            const embed = new EmbedBuilder()
+                .setTitle(`📕 Pokédex de ${interaction.user.username}`)
+                .setDescription(
+                    `**#${startId.toString().padStart(3, '0')}** à **#${endId.toString().padStart(3, '0')}** — ${caughtInRange}/${endId - startId + 1} capturés${shinyInRange > 0 ? ` (${shinyInRange} ✨)` : ''}\n\n` +
+                    `**Filtres :** \`$dex legendary\` • \`$dex mythical\` • \`$dex starter\` • \`$dex pseudo\` • \`$dex shiny\``
+                )
+                .setColor(0xE74C3C)
+                .setImage('attachment://pokedex.png')
+                .addFields(
+                    { name: '📊 Total', value: `${counts.unique}/${MAX_POKEMON_ID} (${completionPercent}%)`, inline: true },
+                    { name: '🎯 Attrapés', value: `${counts.total}`, inline: true },
+                    { name: '✨ Shinies', value: `${counts.shiny}`, inline: true }
+                )
+                .setFooter({ text: `Page ${newPage}/${totalPages}` });
+            
+            const navRow = createPokedexNavButtons(newPage, totalPages, 'dex_main', userId);
+            
+            await interaction.editReply({ embeds: [embed], files: [attachment], components: [navRow] });
+        } else {
+            // Filtered Pokedex
+            const filterData = getFilteredPokemonIds(filterType);
+            if (!filterData) return true;
+            
+            let filteredIds = filterData.ids;
+            
+            if (filterData.special === 'shiny') {
+                filteredIds = [...caughtMap.entries()]
+                    .filter(([id, entry]) => entry.shiny_caught)
+                    .map(([id]) => id)
+                    .sort((a, b) => a - b);
+            }
+            
+            if (!filteredIds || filteredIds.length === 0) return true;
+            
+            const perPage = 35;
+            const startIdx = (newPage - 1) * perPage;
+            const pageIds = filteredIds.slice(startIdx, startIdx + perPage);
+            
+            let caughtCount = 0;
+            let shinyCount = 0;
+            for (const id of filteredIds) {
+                const entry = caughtMap.get(id);
+                if (entry) {
+                    caughtCount++;
+                    if (entry.shiny_caught) shinyCount++;
+                }
+            }
+            
+            const imageBuffer = await generateFilteredPokedexImage(pageIds, caughtMap, filterData.bgColor);
+            const attachment = new AttachmentBuilder(imageBuffer, { name: 'pokedex-filtered.png' });
+            
+            const completionPercent = ((caughtCount / filteredIds.length) * 100).toFixed(1);
+            
+            const embed = new EmbedBuilder()
+                .setTitle(`${filterData.emoji} Pokédex - ${filterData.name}`)
+                .setDescription(`**${caughtCount}/${filteredIds.length}** capturés (${completionPercent}%)${shinyCount > 0 ? ` • ${shinyCount} ✨` : ''}`)
+                .setColor(filterData.color)
+                .setImage('attachment://pokedex-filtered.png')
+                .setFooter({ text: `Page ${newPage}/${totalPages}` });
+            
+            const navRow = createPokedexNavButtons(newPage, totalPages, `dex_${filterType}`, userId);
+            
+            await interaction.editReply({ embeds: [embed], files: [attachment], components: [navRow] });
+        }
+    } catch (error) {
+        console.error('Error updating pokedex page:', error);
+        await interaction.followUp({ content: '❌ Erreur lors du changement de page.', ephemeral: true });
+    }
+    
+    return true;
 }
 
 /**

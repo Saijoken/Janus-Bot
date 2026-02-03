@@ -233,6 +233,31 @@ client.on('messageCreate', async (message) => {
             case 'boite':
                 await pokemonCommands.pcCommand(message, args);
                 break;
+            case 'evolve':
+            case 'evoluer':
+                await pokemonCommands.evolveCommand(message, args);
+                break;
+            case 'megashop':
+            case 'megaboutique':
+            case 'pierres':
+                await pokemonCommands.megashopCommand(message, args);
+                break;
+            case 'buildpokemoncache':
+                // Admin command to build French names cache
+                if (message.member?.permissions?.has('Administrator')) {
+                    await pokemonCommands.buildFrenchNamesCache(message);
+                } else {
+                    await message.reply('❌ Cette commande est réservée aux administrateurs.');
+                }
+                break;
+            case 'buildcategoriescache':
+                // Admin command to build categories cache (legendary, mythical, etc.)
+                if (message.member?.permissions?.has('Administrator')) {
+                    await pokemonCommands.buildCategoriesCache(message);
+                } else {
+                    await message.reply('❌ Cette commande est réservée aux administrateurs.');
+                }
+                break;
             case 'say':
                 await gamesCommands.sayCommand(message, args);
                 break;
@@ -353,6 +378,19 @@ client.on('interactionCreate', async (interaction) => {
             await pokemonCommands.handlePokemonInteraction(interaction);
         } catch (error) {
             console.error('Error handling Pokemon interaction:', error);
+            await interaction.reply({ 
+                content: '❌ Une erreur est survenue.', 
+                ephemeral: true 
+            }).catch(() => {});
+        }
+    }
+    
+    // Handle Pokedex navigation buttons
+    if (interaction.customId.startsWith('dex_')) {
+        try {
+            await pokemonCommands.handlePokedexNavigation(interaction);
+        } catch (error) {
+            console.error('Error handling Pokedex navigation:', error);
             await interaction.reply({ 
                 content: '❌ Une erreur est survenue.', 
                 ephemeral: true 

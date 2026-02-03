@@ -55,11 +55,15 @@ export async function getUser(userId, guildId) {
     if (typeof user.achievements === 'string') {
         user.achievements = JSON.parse(user.achievements);
     }
+    if (typeof user.mega_stones === 'string') {
+        user.mega_stones = JSON.parse(user.mega_stones);
+    }
     
     // Ensure defaults
     if (!user.fish_inventory) user.fish_inventory = {};
     if (!user.fish_collection) user.fish_collection = {};
     if (!user.achievements) user.achievements = {};
+    if (!user.mega_stones) user.mega_stones = {};
     if (user.has_collection_complete === null) user.has_collection_complete = false;
     if (user.daily_streak === null || user.daily_streak === undefined) user.daily_streak = 0;
     
@@ -1035,10 +1039,10 @@ export async function updateLastCatch(userId, guildId) {
 export async function addPokemonCatch(userId, guildId, pokemon) {
     const { id, name, isShiny } = pokemon;
     
-    // Add to catches table
+    // Add to catches table (evolution_stage=1, is_mega=false by default)
     await pool.query(
-        `INSERT INTO pokemon_catches (user_id, guild_id, pokemon_id, pokemon_name, is_shiny, caught_at)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
+        `INSERT INTO pokemon_catches (user_id, guild_id, pokemon_id, pokemon_name, is_shiny, caught_at, evolution_stage, is_mega)
+         VALUES ($1, $2, $3, $4, $5, $6, 1, FALSE)`,
         [userId, guildId, id, name, isShiny, new Date().toISOString()]
     );
     
@@ -1141,6 +1145,114 @@ export async function getPokemonCounts(userId, guildId) {
         unique: parseInt(uniqueResult.rows[0].unique) || 0,
         shiny: parseInt(shinyResult.rows[0].shiny) || 0
     };
+}
+
+/**
+ * Get user's catch(es) for a given Pokedex Pokemon ID (e.g. 1 = Bulbasaur)
+ * Returns the most recent catch of that species.
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @param {number} pokemonId - Pokedex species ID
+ * @param {number} limit - Max results (default 1)
+ * @returns {Promise<Object[]>} Catch rows
+ */
+export async function getPokemonCatchesByPokemonId(userId, guildId, pokemonId, limit = 1) {
+    const result = await pool.query(
+        `SELECT * FROM pokemon_catches 
+         WHERE user_id = $1 AND guild_id = $2 AND pokemon_id = $3 
+         ORDER BY caught_at DESC
+         LIMIT $4`,
+        [userId, guildId, pokemonId, limit]
+    );
+    return result.rows;
+}
+
+/**
+ * Get a single Pokemon catch by id (must belong to user/guild)
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @param {number} catchId - Catch row id
+ * @returns {Promise<Object|null>} Catch row or null
+ */
+export async function getPokemonCatchById(userId, guildId, catchId) {
+    const result = await pool.query(
+        'SELECT * FROM pokemon_catches WHERE id = $1 AND user_id = $2 AND guild_id = $3',
+        [catchId, userId, guildId]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return row;
+}
+
+/**
+ * Update a Pokemon's evolution (normal evolve or mega)
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @param {number} catchId - Catch row id
+ * @param {Object} data - { pokemonId, pokemonName, evolutionStage, isMega?, megaForm? }
+ * @returns {Promise<boolean>} Success
+ */
+export async function updatePokemonEvolution(userId, guildId, catchId, data) {
+    const { pokemonId, pokemonName, evolutionStage, isMega = false, megaForm = null } = data;
+    const result = await pool.query(
+        `UPDATE pokemon_catches
+         SET pokemon_id = $1, pokemon_name = $2, evolution_stage = $3, is_mega = $4, mega_form = $5
+         WHERE id = $6 AND user_id = $7 AND guild_id = $8`,
+        [pokemonId, pokemonName, evolutionStage, isMega, megaForm, catchId, userId, guildId]
+    );
+    return result.rowCount > 0;
+}
+
+/**
+ * Get user's mega stone inventory { stoneId: quantity }
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @returns {Promise<Object>}
+ */
+export async function getMegaStones(userId, guildId) {
+    const user = await getUser(userId, guildId);
+    const stones = user.mega_stones && typeof user.mega_stones === 'object' ? user.mega_stones : {};
+    return stones;
+}
+
+/**
+ * Add mega stone(s) to user inventory
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @param {string} stoneId - e.g. 'charizardite-x'
+ * @param {number} quantity - Number to add
+ * @returns {Promise<number>} New quantity for that stone
+ */
+export async function addMegaStone(userId, guildId, stoneId, quantity = 1) {
+    const user = await getUser(userId, guildId);
+    const stones = { ...(user.mega_stones || {}) };
+    stones[stoneId] = (stones[stoneId] || 0) + quantity;
+    await pool.query(
+        'UPDATE users SET mega_stones = $1 WHERE user_id = $2 AND guild_id = $3',
+        [JSON.stringify(stones), userId, guildId]
+    );
+    return stones[stoneId];
+}
+
+/**
+ * Use (consume) one mega stone from user inventory
+ * @param {string} userId - Discord user ID
+ * @param {string} guildId - Discord guild ID
+ * @param {string} stoneId - e.g. 'charizardite-x'
+ * @returns {Promise<boolean>} True if had stone and consumed it
+ */
+export async function useMegaStone(userId, guildId, stoneId) {
+    const user = await getUser(userId, guildId);
+    const stones = { ...(user.mega_stones || {}) };
+    const current = stones[stoneId] || 0;
+    if (current < 1) return false;
+    stones[stoneId] = current - 1;
+    if (stones[stoneId] === 0) delete stones[stoneId];
+    await pool.query(
+        'UPDATE users SET mega_stones = $1 WHERE user_id = $2 AND guild_id = $3',
+        [JSON.stringify(stones), userId, guildId]
+    );
+    return true;
 }
 
 /**

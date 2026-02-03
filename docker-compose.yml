@@ -162,14 +162,13 @@ services:
     volumes:
       # Persist the economy.json database
       - ./economy.json:/app/economy.json
-      # Optional: persist data in a data directory
-      - bot-data:/app/data
+      # Data directory with caches (French names, categories, etc.)
+      - ./data:/app/data
     # Keep container running even if it crashes (restart policy handles this)
     stdin_open: true
     tty: true
 
 volumes:
-  bot-data:
   postgres-data:
 
 networks:

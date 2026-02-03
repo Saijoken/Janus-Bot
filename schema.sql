@@ -42,7 +42,10 @@ CREATE TABLE IF NOT EXISTS pokemon_catches (
     is_shiny BOOLEAN DEFAULT FALSE,
     caught_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     level INTEGER DEFAULT 1,
-    favorite BOOLEAN DEFAULT FALSE
+    favorite BOOLEAN DEFAULT FALSE,
+    evolution_stage INTEGER DEFAULT 1,
+    is_mega BOOLEAN DEFAULT FALSE,
+    mega_form VARCHAR(80)
 );
 
 -- Pokemon pokedex progress (tracks which species user has seen/caught)
@@ -60,6 +63,12 @@ CREATE TABLE IF NOT EXISTS pokemon_pokedex (
 
 -- Add last_catch column to users if not exists
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_catch TIMESTAMP;
+-- Pokemon evolution: evolution_stage (1/2/3), is_mega, mega_form
+ALTER TABLE pokemon_catches ADD COLUMN IF NOT EXISTS evolution_stage INTEGER DEFAULT 1;
+ALTER TABLE pokemon_catches ADD COLUMN IF NOT EXISTS is_mega BOOLEAN DEFAULT FALSE;
+ALTER TABLE pokemon_catches ADD COLUMN IF NOT EXISTS mega_form VARCHAR(80);
+-- User mega stone inventory (stone_id -> quantity)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS mega_stones JSONB DEFAULT '{}'::jsonb;
 
 -- Indexes for better performance
 CREATE INDEX IF NOT EXISTS idx_users_user_guild ON users(user_id, guild_id);
